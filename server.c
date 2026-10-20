@@ -31,15 +31,33 @@ go back to blocking on accept
 #include <pthread.h>
 #include <sys/time.h>
 
+
+// The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
 #define PORT "8080"
+
+// Default directory containing files served by the origin server.
 #define ROOT "./www"
+
+// Number of seconds an idle connection remains open.
 #define TIMEOUT 10
+
+// Size of buffer for reading files and sending responses.
 #define BUFFERSIZE 8192
+
+// Maximum size of incoming HTTP header allowed.
 #define MAX_REQUEST 16384
 
+// Canonical path of the webroot, initialized in main.
 static char webroot[PATH_MAX];
 
+/*
+ * Information passed from the main accept loop to a client thread.
+ *
+ * fd = Connected client socket.
+ * address = Client's network address.
+ * persistent = Whether the connection may handle multiple requests.
+ */
 struct connection_args { // instead of the dict
     int fd;
     struct sockaddr_storage address;
@@ -63,6 +81,7 @@ struct connection_args { // instead of the dict
 static int sendall(int fd, const void *data, size_t len) {
     const char *bytes = (const char *)data;
     ssize_t sent = 0;
+    // https://man7.org/linux/man-pages/man2/send.2.html
     while (sent < len) {
         ssize_t n = send(fd, bytes + sent, len - sent, 0);
         if (n < 0 || n == 0) return -1;
@@ -82,9 +101,8 @@ static int sendall(int fd, const void *data, size_t len) {
  * @return A string containing the appropriate MIME type.
  */
 static const char *mimeType(const char* path) {
-    const char *exten = strrchr(path, '.'); // links have an extension to say what type they are
+    const char *exten = strrchr(path, '.'); // Files have an extension to determine their MIME type.
     if (exten == NULL) return "text/plain"; // placeholder
-    if (strcmp(exten, ".html") == 0) return "text/html";
     if (strcmp(exten, ".html") == 0) return "text/html";
     if (strcmp(exten, ".txt") == 0) return "text/plain";
     if (strcmp(exten, ".css") == 0) return "text/css";
@@ -166,8 +184,14 @@ static int readRequest(int fd, char *request, size_t requestLength) {
     size_t lookedAt = 0;
 
     while (lookedAt + 1 < requestLength) {
+        // https://man7.org/linux/man-pages/man2/recv.2.html
         ssize_t n = recv(fd, request + lookedAt, requestLength - lookedAt - 1, 0);
-        if (n < 0) continue;
+        if (n < 0) {
+            if (errno == EINTR)
+            continue;
+
+            return -1;
+        }
         if (n <= 0) return (int)n;
 
         lookedAt += n;
@@ -182,6 +206,7 @@ static int readRequest(int fd, char *request, size_t requestLength) {
 
 
 // https://safeguard.sh/resources/blog/path-traversal-prevention-in-c-with-pathgetfullpath
+// https://man7.org/linux/man-pages/man3/realpath.3.html
 /**
  * Checks whether a canonical file path remains inside the web root.
  *
@@ -221,26 +246,32 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     struct stat fileInfo;
     char canonPath[PATH_MAX];
 
+    // Parse the method, URL path, and HTTP version from the request line.
     fields = sscanf(request, "%15s %4095s %15s", method, path, version);
     if (fields != 3) {
         buildResponse(fd, 400, 0, "text/plain", "close");
         return;
     }
 
+    // Only supports GET requests at the moment.
     if (strcmp(method, "GET") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
         return;
     }
 
-    if (path[0] != '/' ||
-    strchr(path, '?') != NULL ||
-    snprintf(fullPath, sizeof(fullPath),
-             "%s%s", webroot, path) >= sizeof(fullPath) ||
-    realpath(fullPath, canonPath) == NULL ||
-    !pathCheck(canonPath) ||
-    stat(canonPath, &fileInfo) < 0 ||
-    !S_ISREG(fileInfo.st_mode)) {
-
+    // https://man7.org/linux/man-pages/man3/realpath.3.html
+    /*
+     * Reject the request if:
+     * The URL is not an absolute path.
+     * It has a query string.
+     * It exceeds fullPath.
+     * The path is not a regular file.
+     * realPath() can't resolve the file.
+     * The canonical path isn't part of the directory.
+     */
+    if (path[0] != '/' || strchr(path, '?') != NULL || snprintf(fullPath, sizeof(fullPath),
+        "%s%s", webroot, path) >= sizeof(fullPath) || realpath(fullPath, canonPath) == NULL ||
+        !pathCheck(canonPath) || stat(canonPath, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
         buildResponse(fd, 404, 0, "text/plain", connection);
         return;
     }
@@ -251,12 +282,12 @@ static void serveRequest(int fd, const char *request, const char *connection) {
         return;
     }
 
-    if (buildResponse(fd, 200, (size_t)fileInfo.st_size,
-                    mimeType(canonPath), connection) < 0) {
+    if (buildResponse(fd, 200, (size_t)fileInfo.st_size, mimeType(canonPath), connection) < 0) {
         fclose(file);
         return;
-                    }
+    }
 
+    // Load the file in chunks, needed for large files.
     while ((bytesRead = fread(buf, 1, sizeof(buf), file)) > 0) {
         if (sendall(fd, buf, bytesRead) < 0)
             break;
@@ -302,10 +333,17 @@ static void *connectThread(void *raw_args)
     char request[MAX_REQUEST];
     struct timeval timeout = { TIMEOUT, 0 };
 
+    // The accepted socket is stored in heap memory because the main thread passes it to a detached thread. The thread is responsible for freeing the structure and closing the socket.
     free(args);
+    // Stops a persistent client from keeping the connection open without sending another request.
     if (persistent)
         setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    // https://linux.die.net/man/2/setsockopt
+    // SOL_SOCKET is used as the level argument to configure options at the socket API layer, it means that the option we want to modify is protocol-independent and is handled by the socket framework
+    // https://man7.org/linux/man-pages/man7/socket.7.html
+    // SO_RCVTIMEO limits how long a blocking receive operation waits for incoming data. This prevents an idle persistent client from occupying a thread forever.
 
+    // ;; for persistent mode, it should continue to process requests until the client closes the connection or the connection times out.
     for (;;) {
         int result = readRequest(clientFd, request, sizeof(request));
         if (result <= 0)
@@ -348,16 +386,22 @@ static int makeListener(void)
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
+    // Convert HOST and PORT into usable socket address structures.
     if (getaddrinfo(HOST, PORT, &hints, &results) != 0)
         return -1;
 
     for (rp = results; rp != NULL; rp = rp->ai_next) {
+        // Create the listening socket.
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0)
             continue;
+        // Allow the port to be reused after the server exits
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        // SO_REUSEADDR is a socket option that allows a socket to forcibly bind to a port that is still tied up by an old connection.
+        // https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse
+        // Assign the IP address and port to the socket.
         if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0 &&
-            listen(fd, 64) == 0)
+            listen(fd, 64) == 0) // Mark the socket as ready to accept incoming connections.
             break;
         close(fd);
         fd = -1;
@@ -369,6 +413,7 @@ static int makeListener(void)
 
 int main(int argc, char **argv)
 {
+    // Get the mode from the command-line argument
     const char *mode = argc > 1 ? argv[1] : "persistent";
     int persistent = strcmp(mode, "persistent") == 0;
     int single_threaded = strcmp(mode, "single-threaded") == 0;
@@ -377,6 +422,8 @@ int main(int argc, char **argv)
     if (!persistent && !single_threaded && strcmp(mode, "non-persistent") != 0) {
         return EXIT_FAILURE;
     }
+
+    // Resolve the web root to give pathCheck() a directory to compare with files.
     const char *rootArgument = argc > 2 ? argv[2] : ROOT;
 
     if (realpath(rootArgument, webroot) == NULL) {
@@ -404,6 +451,7 @@ int main(int argc, char **argv)
             continue;
 
         length = sizeof(args->address);
+        // Wait for client connection.
         args->fd = accept(listener, (struct sockaddr *)&args->address, &length);
         if (args->fd < 0) {
             free(args);
@@ -416,8 +464,8 @@ int main(int argc, char **argv)
 
         if (single_threaded) {
             connectThread(args);
-        } else if (pthread_create(&thread, NULL, connectThread, args) == 0) {
-            pthread_detach(thread);
+        } else if (pthread_create(&thread, NULL, connectThread, args) == 0) { // https://man7.org/linux/man-pages/man3/pthread_create.3.html
+            pthread_detach(thread); // https://man7.org/linux/man-pages/man3/pthread_detach.3.html
         } else {
             close(args->fd);
             free(args);
