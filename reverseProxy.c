@@ -26,6 +26,8 @@
 #define HOST "127.0.0.1"
 #define PORT "8080"
 
+#define REDIRECT "https://happlecraft.com/"
+
 // Default directory containing files served by the origin server.
 #define ROOT "./www"
 
@@ -243,6 +245,11 @@ static void serveRequest(int fd, const char *request, const char *connection) {
         return;
     }
 
+    char requestUrl[8192];
+    sprintf(requestUrl, "%s%s", REDIRECT, path)
+
+    /* This was the code to just get the contents of a file on the server drive.
+
     // Only supports GET requests at the moment.
     if (strcmp(method, "GET") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
@@ -250,7 +257,7 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     }
 
     // https://man7.org/linux/man-pages/man3/realpath.3.html
-    /*
+    
      * Reject the request if:
      * The URL is not an absolute path.
      * It has a query string.
@@ -258,13 +265,14 @@ static void serveRequest(int fd, const char *request, const char *connection) {
      * The path is not a regular file.
      * realPath() can't resolve the file.
      * The canonical path isn't part of the directory.
-     */
+     
     if (path[0] != '/' || strchr(path, '?') != NULL || snprintf(fullPath, sizeof(fullPath),
         "%s%s", webroot, path) >= sizeof(fullPath) || realpath(fullPath, canonPath) == NULL ||
         !pathCheck(canonPath) || stat(canonPath, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
         buildResponse(fd, 404, 0, "text/plain", connection);
         return;
-    }
+    }       
+    */
 
     file = fopen(canonPath, "rb");
     if (file == NULL) {
@@ -283,6 +291,7 @@ static void serveRequest(int fd, const char *request, const char *connection) {
             break;
     }
     fclose(file);
+    
 }
 
 /**
