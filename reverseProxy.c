@@ -1,6 +1,16 @@
-//
-// Created by keybl on 10/19/2026.
-//
+// https://dev.to/jeffreythecoder/how-i-built-a-simple-http-server-from-scratch-using-c-739
+
+/* https://beej.us/guide/bgnet/
+create socket
+bing socket to address
+listen on address
+block on accept until connection is made
+read on connected socket
+figure out how to respond
+write back on the connected socket
+close the connection
+go back to blocking on accept
+*/
 
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L // suggested these two and I'm not sure why
@@ -8,6 +18,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -20,13 +31,12 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include "requests.h" //Library for simplified outgoing requests https://github.com/mactul/requests.c
 
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
 #define PORT "8080"
-
-#define REDIRECT "https://happlecraft.com/"
 
 // Default directory containing files served by the origin server.
 #define ROOT "./www"
@@ -245,11 +255,6 @@ static void serveRequest(int fd, const char *request, const char *connection) {
         return;
     }
 
-    char requestUrl[8192];
-    sprintf(requestUrl, "%s%s", REDIRECT, path)
-
-    /* This was the code to just get the contents of a file on the server drive.
-
     // Only supports GET requests at the moment.
     if (strcmp(method, "GET") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
@@ -257,24 +262,48 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     }
 
     // https://man7.org/linux/man-pages/man3/realpath.3.html
-    
+    /*
      * Reject the request if:
      * The URL is not an absolute path.
-     * It has a query string.
+     * ~It has a query string.
      * It exceeds fullPath.
-     * The path is not a regular file.
-     * realPath() can't resolve the file.
-     * The canonical path isn't part of the directory.
-     
-    if (path[0] != '/' || strchr(path, '?') != NULL || snprintf(fullPath, sizeof(fullPath),
-        "%s%s", webroot, path) >= sizeof(fullPath) || realpath(fullPath, canonPath) == NULL ||
-        !pathCheck(canonPath) || stat(canonPath, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
+     * ~The path is not a regular file.
+     * ~realPath() can't resolve the file.
+     * ~The canonical path isn't part of the directory.
+     */
+    if (path[0] != '/' || snprintf(fullPath, sizeof(fullPath),
+        "%s%s", webroot, path) >= sizeof(fullPath)) {
         buildResponse(fd, 404, 0, "text/plain", connection);
         return;
-    }       
-    */
+    }
 
-    file = fopen(canonPath, "rb");
+    // TODO: analyze traffic for behavior.
+
+    char redirectUrl[8192];
+    sprintf(redirectUrl, "%s%s", "https://example.com", path);
+
+    file = fopen("./tmp.txt", "w+"); // is there a better way to do this? maybe... I tried tmpfile() and that just didn't return anything, so alas, a literal temp file.
+    RequestsHandler *handler = NULL;
+    int outSize;
+    
+    req_init();
+    handler = req_get(NULL, handler, redirectUrl, ""); 
+
+    while((outSize = req_read_output_body(handler, buf, sizeof(buf)-1)) > 0)
+        {
+            buf[outSize] = '\0';
+            printf("%s", buf);
+        }
+
+    fprintf(file, "This url will redirect to: %s", redirectUrl); //TODO: write contents of webpage to this
+    fclose(file);
+
+    req_close_connection(&handler);
+    req_destroy();
+
+    stat("./tmp.txt", &fileInfo); //refresh file info for accurate streaming size
+
+    file = fopen("./tmp.txt", "rb");
     if (file == NULL) {
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
@@ -291,7 +320,6 @@ static void serveRequest(int fd, const char *request, const char *connection) {
             break;
     }
     fclose(file);
-    
 }
 
 /**
@@ -308,7 +336,7 @@ static int closeRequest(const char *request) {
     const char *header = strcasestr(request, "Connection:");
     if (header == NULL)
         return 0;
-    return strncasecmp(header + strlen("Connection:"), " close", 6) == 0 ||
+    return strncasecmp(header + strlen("Connection:"), " close", (size_t)6) == 0 ||
            strcasestr(header, "close") != NULL;
 }
 
