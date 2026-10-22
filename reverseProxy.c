@@ -31,7 +31,6 @@ go back to blocking on accept
 #include <limits.h>
 #include <pthread.h>
 #include <sys/time.h>
-#include "requests.h" //Library for simplified outgoing requests https://github.com/mactul/requests.c
 
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
@@ -104,7 +103,7 @@ static int sendall(int fd, const void *data, size_t len) {
  */
 static const char *mimeType(const char* path) {
     const char *exten = strrchr(path, '.'); // Files have an extension to determine their MIME type.
-    if (exten == NULL) return "text/plain"; // placeholder
+    if (exten == NULL) return "text/html"; // placeholder
     if (strcmp(exten, ".html") == 0) return "text/html";
     if (strcmp(exten, ".txt") == 0) return "text/plain";
     if (strcmp(exten, ".css") == 0) return "text/css";
@@ -225,6 +224,10 @@ static int pathCheck(const char *path) {
     return strcmp(path, webroot) == 0 || (strncmp(path, webroot, len) == 0 && path[len] == '/');
 }
 
+static void sendForwardRequest(char *url) { // TODO: forward headers and body
+
+}
+
 /**
  * Processes one HTTP request and sends the appropriate response.
  *
@@ -279,47 +282,57 @@ static void serveRequest(int fd, const char *request, const char *connection) {
 
     // TODO: analyze traffic for behavior.
 
-    char redirectUrl[8192];
+    char redirectUrl[8192], redirectRequest[8192];
     sprintf(redirectUrl, "%s%s", "https://example.com", path);
 
-    file = fopen("./tmp.txt", "w+"); // is there a better way to do this? maybe... I tried tmpfile() and that just didn't return anything, so alas, a literal temp file.
-    RequestsHandler *handler = NULL;
-    int outSize;
-    
-    req_init();
-    handler = req_get(NULL, handler, redirectUrl, ""); 
 
-    while((outSize = req_read_output_body(handler, buf, sizeof(buf)-1)) > 0)
-        {
-            buf[outSize] = '\0';
-            printf("%s", buf);
-        }
 
-    fprintf(file, "This url will redirect to: %s", redirectUrl); //TODO: write contents of webpage to this
-    fclose(file);
+    //make forwarded request, write to file
+    //https://stackoverflow.com/questions/11208299/how-to-make-an-http-get-request-in-c-without-libcurl
 
-    req_close_connection(&handler);
-    req_destroy();
+    FILE *outs = fopen("log,txt", "a");
 
-    stat("./tmp.txt", &fileInfo); //refresh file info for accurate streaming size
-
-    file = fopen("./tmp.txt", "rb");
-    if (file == NULL) {
+    //open socket
+    int fwsock;
+    fwsock = socket(AF_INET, SOCK_STREAM, 0);
+    if (fwsock < 0) {
+        fprintf(outs, "failed to open fowrard socket.\n");
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
     }
 
-    if (buildResponse(fd, 200, (size_t)fileInfo.st_size, mimeType(canonPath), connection) < 0) {
-        fclose(file);
+    // form request
+    snprintf(redirectRequest, 8192, "GET %s HTTP/1.0\r\nHost: %s\r\n", path, "192.168.86.69:5000");
+    // write request
+    if (write(fwsock, redirectRequest, strlen(redirectRequest)) < 0) {
+        fprintf(outs, "failed to owrite request to forward socket.\n");
+        buildResponse(fd, 404, 0, "text/plain", "close");
         return;
     }
+    
+    if (buildResponse(fd, 200, 1024, mimeType(canonPath), connection) < 0) { //(size_t)fileInfo.st_size in place of 1024
+        //fclose(file);
+        fprintf(outs, "great success.\n");
+        //return;
+    }
+    
+    // read response directly to buffer
+    int n;
 
-    // Load the file in chunks, needed for large files.
+    while ((n = read(fwsock, buf, BUFFERSIZE)) > 0) {
+        if (sendall(fd, buf, bytesRead) < 0)
+            break;
+    }
+    fprintf(outs, "great successes.\n");
+
+    close(fwsock);
+    fclose(outs);
+    /*
     while ((bytesRead = fread(buf, 1, sizeof(buf), file)) > 0) {
         if (sendall(fd, buf, bytesRead) < 0)
             break;
     }
-    fclose(file);
+            */
 }
 
 /**
