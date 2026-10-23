@@ -35,7 +35,9 @@ go back to blocking on accept
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
-#define PORT "8080"
+#define PORT "8081"
+#define FORWARD "127.0.0.1"
+#define FORWARD_PORT "8080"
 
 // Default directory containing files served by the origin server.
 #define ROOT "./www"
@@ -243,7 +245,7 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     char buf[BUFFERSIZE];
     char method[16];
     char version[16];
-    char path[4096];
+    char path[1024];
     char fullPath[8192];
     FILE *file;
     size_t bytesRead;
@@ -290,49 +292,53 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     //make forwarded request, write to file
     //https://stackoverflow.com/questions/11208299/how-to-make-an-http-get-request-in-c-without-libcurl
 
-    FILE *outs = fopen("log,txt", "a");
-
-    //open socket
+    struct sockaddr_in addr;
     int fwsock;
+    
     fwsock = socket(AF_INET, SOCK_STREAM, 0);
     if (fwsock < 0) {
-        fprintf(outs, "failed to open fowrard socket.\n");
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    }
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
+
+    inet_pton(AF_INET, FORWARD, &addr.sin_addr);
+
+    if(connect(fwsock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
     }
 
     // form request
-    snprintf(redirectRequest, 8192, "GET %s HTTP/1.0\r\nHost: %s\r\n", path, "192.168.86.69:5000");
+    int reqlen = snprintf(redirectRequest, 1024, "GET %s HTTP/1.1\r\nHost: %s:%s\r\nConnection: close\r\n\r\n", path, FORWARD, FORWARD_PORT);
     // write request
-    if (write(fwsock, redirectRequest, strlen(redirectRequest)) < 0) {
-        fprintf(outs, "failed to owrite request to forward socket.\n");
-        buildResponse(fd, 404, 0, "text/plain", "close");
-        return;
-    }
-    
-    if (buildResponse(fd, 200, 1024, mimeType(canonPath), connection) < 0) { //(size_t)fileInfo.st_size in place of 1024
-        //fclose(file);
-        fprintf(outs, "great success.\n");
-        //return;
+
+    ssize_t nbytes_total, nbytes_last;
+    nbytes_total = 0;
+    while (nbytes_total < reqlen)
+    {
+        nbytes_last = write(fwsock, redirectRequest + nbytes_total, reqlen - nbytes_total);
+        if (nbytes_last < -1) {
+            perror("write");
+            //return;
+        }
+        nbytes_total += nbytes_last;
     }
     
     // read response directly to buffer
     int n;
-
+    
     while ((n = read(fwsock, buf, BUFFERSIZE)) > 0) {
-        if (sendall(fd, buf, bytesRead) < 0)
-            break;
+        if (sendall(fd, buf, n) < 0)
+        
+        break;
     }
-    fprintf(outs, "great successes.\n");
-
+    
+    //Must send after for exact content size.
+    buildResponse(fd, 200, n, "text/html", connection); //specific minetype can be adjusted later, for now assuming most is gonna be html
     close(fwsock);
-    fclose(outs);
-    /*
-    while ((bytesRead = fread(buf, 1, sizeof(buf), file)) > 0) {
-        if (sendall(fd, buf, bytesRead) < 0)
-            break;
-    }
-            */
 }
 
 /**
@@ -478,8 +484,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    printf("C server listening at http://%s:%s\n", HOST, PORT);
-    printf("Mode: %s\nWeb root: %s\n", mode, webroot);
+    printf("Reverse Proxy listening at http://%s:%s\n", HOST, PORT);
+    printf("Redirecting traffic to http://%s:%s\n", FORWARD, FORWARD_PORT);
 
     for (;;) {
         struct connection_args *args;
