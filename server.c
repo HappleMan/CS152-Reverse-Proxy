@@ -254,10 +254,11 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     }
 
     // Only supports GET requests at the moment.
-    if (strcmp(method, "GET") != 0) {
+    if ((strcmp(method, "GET") != 0) || (strcmp(method, "GET") != 0) || (strcmp(method, "HEAD") != 0) || (strcmp(method, "POST") != 0)
+        || (strcmp(method, "PUT") != 0) || (strcmp(method, "PATCH") != 0) || (strcmp(method, "DELETE") != 0) || (strcmp(method, "OPTIONS") != 0)) {
         buildResponse(fd, 405, 0, "text/plain", "close");
         return;
-    }
+        }
 
     // https://man7.org/linux/man-pages/man3/realpath.3.html
     /*
