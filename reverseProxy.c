@@ -226,9 +226,52 @@ static int pathCheck(const char *path) {
     return strcmp(path, webroot) == 0 || (strncmp(path, webroot, len) == 0 && path[len] == '/');
 }
 
-static void sendForwardRequest(char *url) { // TODO: forward headers and body
 
+/**
+ * Returns a file from the directory to client. Built for admin panel and custom error pages
+ *
+ * @param fd          Connected client socket.
+ * @param request     Raw HTTP request.
+ * @param connection  Value for the HTTP Connection header.
+ * @param path        The path of the file.
+ */
+static int returnFile(int fd, const char *request, const char *connection, char *path) {
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return 1;
+    }
+
+    if (buildResponse(fd, 200, (size_t)fileInfo.st_size, mimeType(path), connection) < 0) {
+        fclose(file);
+        return 2;
+    }
+
+    // Load the file in chunks, needed for large files.
+    while ((bytesRead = fread(buf, 1, sizeof(buf), file)) > 0) {
+        if (sendall(fd, buf, bytesRead) < 0)
+            break;
+    }
+    fclose(file);
+    return 0;
 }
+
+/**
+ * Processes information about the accessing client to determine if the request to the server is legitimate.
+ * 
+ * This function will use access times as well as content analysis to determine if the accessor is a bot or scraper.
+ *
+ * @param fd          Connected client socket.
+ * @param request     Raw HTTP request.
+ * @param connection  Value for the HTTP Connection header.
+ * @param path        The path of the client's request.
+ */
+static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
+    int verdict = 0;
+
+    
+    return verdict
+}
+
 
 /**
  * Processes one HTTP request and sends the appropriate response.
@@ -252,6 +295,7 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     int fields;
     struct stat fileInfo;
     char canonPath[PATH_MAX];
+    int verdict;
 
     // Parse the method, URL path, and HTTP version from the request line.
     fields = sscanf(request, "%15s %4095s %15s", method, path, version);
@@ -271,11 +315,7 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     /*
      * Reject the request if:
      * The URL is not an absolute path.
-     * ~It has a query string.
      * It exceeds fullPath.
-     * ~The path is not a regular file.
-     * ~realPath() can't resolve the file.
-     * ~The canonical path isn't part of the directory.
      */
     if (path[0] != '/' || snprintf(fullPath, sizeof(fullPath),
         "%s%s", webroot, path) >= sizeof(fullPath)) {
@@ -283,12 +323,27 @@ static void serveRequest(int fd, const char *request, const char *connection) {
         return;
     }
 
-    // TODO: analyze traffic for behavior.
+    //Determine if requesting the admin panel. I was gonna use a switch case but C switch and strings are not friends.
+    if(strcmp(path, "/reverse_proxy/admin")) { // TODO: Maybe add authentication
+        if (returnFile(fd, request, connection, "admin.html") == 0) {
+            return;
+        } else {
+                buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+            }
+    } // TODO: accept payloads for admin panel requests
+    
+
+    //Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
+    if ((verdict = scanTraffic(fd, request, connection)) != 0) {
+        buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
+        return;
+    } 
+
+    //Traffic validated, make forwarded request and buffer back
 
     char redirectUrl[8192], redirectRequest[8192];
     sprintf(redirectUrl, "%s%s", "https://example.com", path);
-
-
 
     //make forwarded request, write to file
     //https://stackoverflow.com/questions/11208299/how-to-make-an-http-get-request-in-c-without-libcurl
