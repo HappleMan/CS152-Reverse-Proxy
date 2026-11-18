@@ -234,28 +234,26 @@ static int pathCheck(const char *path) {
  * @param request     Raw HTTP request.
  * @param connection  Value for the HTTP Connection header.
  */
-static void serveRequest(int fd, const char *request, const char *connection) {
+static void serveRequest(const int fd, const char *request, const char *connection) {
     char buf[BUFFERSIZE];
     char method[16];
     char version[16];
     char path[4096];
     char fullPath[8192];
-    FILE *file;
     size_t bytesRead;
-    int fields;
     struct stat fileInfo;
     char canonPath[PATH_MAX];
 
     // Parse the method, URL path, and HTTP version from the request line.
-    fields = sscanf(request, "%15s %4095s %15s", method, path, version);
+    int fields = sscanf(request, "%15s %4095s %15s", method, path, version);
     if (fields != 3) {
         buildResponse(fd, 400, 0, "text/plain", "close");
         return;
     }
 
     // Only supports GET requests at the moment.
-    if ((strcmp(method, "GET") != 0) || (strcmp(method, "GET") != 0) || (strcmp(method, "HEAD") != 0) || (strcmp(method, "POST") != 0)
-        || (strcmp(method, "PUT") != 0) || (strcmp(method, "PATCH") != 0) || (strcmp(method, "DELETE") != 0) || (strcmp(method, "OPTIONS") != 0)) {
+    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0 && strcmp(method, "POST") != 0 && strcmp(method, "PUT") != 0 &&
+        strcmp(method, "PATCH") != 0 && strcmp(method, "DELETE") != 0 && strcmp(method, "OPTIONS") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
         return;
         }
@@ -277,7 +275,7 @@ static void serveRequest(int fd, const char *request, const char *connection) {
         return;
     }
 
-    file = fopen(canonPath, "rb");
+    FILE *file = fopen(canonPath, "rb");
     if (file == NULL) {
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
@@ -329,8 +327,8 @@ static int closeRequest(const char *request) {
 static void *connectThread(void *raw_args)
 {
     struct connection_args *args = raw_args;
-    int clientFd = args->fd;
-    int persistent = args->persistent;
+    const int clientFd = args->fd;
+    const int persistent = args->persistent;
     char request[MAX_REQUEST];
     struct timeval timeout = { TIMEOUT, 0 };
 
@@ -346,7 +344,7 @@ static void *connectThread(void *raw_args)
 
     // ;; for persistent mode, it should continue to process requests until the client closes the connection or the connection times out.
     for (;;) {
-        int result = readRequest(clientFd, request, sizeof(request));
+        const int result = readRequest(clientFd, request, sizeof(request));
         if (result <= 0)
             break;
         if (result == -2) {

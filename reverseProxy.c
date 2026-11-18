@@ -19,7 +19,6 @@ go back to blocking on accept
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -31,13 +30,15 @@ go back to blocking on accept
 #include <limits.h>
 #include <pthread.h>
 #include <sys/time.h>
-
+#include <ctype.h>
+#include <limits.h>
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
 #define PORT "8081"
 #define FORWARD "127.0.0.1"
 #define FORWARD_PORT "8080"
+#define MAX_BODY 1048576
 
 // Default directory containing files served by the origin server.
 #define ROOT "./www"
@@ -49,7 +50,7 @@ go back to blocking on accept
 #define BUFFERSIZE 8192
 
 // Maximum size of incoming HTTP header allowed.
-#define MAX_REQUEST 16384
+#define MAX_REQUEST (16384 + MAX_BODY)
 
 // Canonical path of the webroot, initialized in main.
 static char webroot[PATH_MAX];
@@ -135,6 +136,8 @@ static const char *statusCode(const int status) {
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 500: return "Internal Server Error";
+        case 413: return "Payload Too Large";
+        case 502: return "Bad Gateway";
         default: return "Error";
     }
 }
@@ -170,6 +173,38 @@ static int buildResponse(int fd, int status, size_t contentLength, const char *c
 }
 
 /**
+ * Helper to figure out the content length so we don't rely on \r\n\r\n
+ * @param request Destination buffer for the raw request.
+ * @return content length
+ */
+static long getContentLength(const char *request) {
+    char *end;
+
+    const char *header = strcasestr(request, "Content-Length:");
+
+    if (header == NULL) {
+        return 0;
+    }
+
+    const char *value = header + strlen("Content-Length:");
+
+    while (*value != '\0' && isspace((unsigned char)*value)) {
+        value++;
+    }
+
+    errno = 0;
+    long length = strtol(value, &end, 10);
+
+    if (value == end ||
+        errno == ERANGE ||
+        length < 0 ||
+        length > MAX_BODY) {
+        return -1;
+        }
+
+    return length;
+}
+/**
  * Reads an HTTP request from a connected client socket.
  *
  * This function reads until it finds the end of the HTTP request headers,
@@ -184,27 +219,64 @@ static int buildResponse(int fd, int status, size_t contentLength, const char *c
  *         request headers are too large.
  */
 static int readRequest(int fd, char *request, size_t requestLength) {
-    size_t lookedAt = 0;
+    size_t lookedAt = 0; // total
+    size_t headerLength = 0;
+    long contentLength = 0;
+    char *headerEnd;
 
     while (lookedAt + 1 < requestLength) {
         // https://man7.org/linux/man-pages/man2/recv.2.html
         ssize_t n = recv(fd, request + lookedAt, requestLength - lookedAt - 1, 0);
         if (n < 0) {
-            if (errno == EINTR)
-            continue;
-
+            if (errno == EINTR) {
+                continue;
+            }
             return -1;
         }
+
         if (n <= 0) return (int)n;
 
-        lookedAt += n;
+        lookedAt += (size_t)n;
         request[lookedAt] = '\0';
-        if (strstr(request, "\r\n\r\n") != NULL) {
-            return (int)lookedAt;
+        headerEnd = strstr(request, "\r\n\r\n");
+        if (headerEnd != NULL) {
+            headerLength = (size_t)(headerEnd - request) + 4;
+            break;
         }
     }
 
-    return -2; // request header too big
+    if (headerLength == 0) {
+        return -2; // request header too big
+    }
+
+    contentLength = getContentLength(request);
+
+    if (contentLength < 0) {
+        return -3; // content(header + body) too big
+    }
+
+    if (headerLength + (size_t)contentLength >= requestLength) {
+        return -3; // entire request does not fit
+    }
+
+    while (lookedAt < headerLength + (size_t)contentLength) {
+        ssize_t received = recv(fd, request + lookedAt, requestLength - lookedAt - 1, 0);
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+
+        if (received = 0) {
+            return -1;
+        }
+
+        lookedAt += (size_t)received;
+        request[lookedAt] = '\0';
+    }
+
+    return (int)lookedAt;
 }
 
 
@@ -235,7 +307,17 @@ static int pathCheck(const char *path) {
  * @param connection  Value for the HTTP Connection header.
  * @param path        The path of the file.
  */
-static int returnFile(int fd, const char *request, const char *connection, char *path) {
+// const char *request
+static int returnFile(int fd, const char *connection, char *path) {
+    FILE *file;
+    struct stat fileInfo;
+    char buf[BUFFERSIZE];
+    size_t bytesRead;
+
+    if (stat(path, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
+        return 1;
+    }
+
     file = fopen(path, "rb");
     if (file == NULL) {
         return 1;
@@ -265,11 +347,13 @@ static int returnFile(int fd, const char *request, const char *connection, char 
  * @param connection  Value for the HTTP Connection header.
  * @param path        The path of the client's request.
  */
-static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
+// static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
+
+static int scanTraffic(const char *request) {
     int verdict = 0;
 
     
-    return verdict
+    return verdict;
 }
 
 
@@ -284,29 +368,27 @@ static void scanTraffic(int fd, const char *request, const char *connection, cha
  * @param request     Raw HTTP request.
  * @param connection  Value for the HTTP Connection header.
  */
-static void serveRequest(int fd, const char *request, const char *connection) {
+static void serveRequest(int fd, const char *request, size_t requestLength, const char *connection) {
     char buf[BUFFERSIZE];
     char method[16];
     char version[16];
     char path[1024];
     char fullPath[8192];
-    FILE *file;
-    size_t bytesRead;
-    int fields;
+    //FILE *file;
+    //size_t bytesRead;
     struct stat fileInfo;
-    char canonPath[PATH_MAX];
+    //char canonPath[PATH_MAX];
     int verdict;
 
     // Parse the method, URL path, and HTTP version from the request line.
-    fields = sscanf(request, "%15s %4095s %15s", method, path, version);
+    int fields = sscanf(request, "%15s %1023s %15s", method, path, version);
     if (fields != 3) {
         buildResponse(fd, 400, 0, "text/plain", "close");
         return;
     }
 
-    // Only supports GET requests at the moment.
-    if ((strcmp(method, "GET") != 0) || (strcmp(method, "GET") != 0) || (strcmp(method, "HEAD") != 0) || (strcmp(method, "POST") != 0)
-        || (strcmp(method, "PUT") != 0) || (strcmp(method, "PATCH") != 0) || (strcmp(method, "DELETE") != 0) || (strcmp(method, "OPTIONS") != 0)) {
+    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0 && strcmp(method, "POST") != 0 && strcmp(method, "PUT") != 0 &&
+        strcmp(method, "PATCH") != 0 && strcmp(method, "DELETE") != 0 && strcmp(method, "OPTIONS") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
         return;
     }
@@ -324,26 +406,28 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     }
 
     //Determine if requesting the admin panel. I was gonna use a switch case but C switch and strings are not friends.
-    if(strcmp(path, "/reverse_proxy/admin")) { // TODO: Maybe add authentication
-        if (returnFile(fd, request, connection, "admin.html") == 0) {
+    if (strcmp(path, "/reverse_proxy/admin") == 0) { // TODO: Maybe add authentication
+        char adminPath[PATH_MAX];
+        snprintf(adminPath, sizeof(adminPath), "%s/admin.html", webroot);
+        if (returnFile(fd, connection, adminPath) == 0) {
             return;
-        } else {
-                buildResponse(fd, 500, 0, "text/plain", "close");
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
         return;
-            }
-    } // TODO: accept payloads for admin panel requests
-    
+    }// TODO: accept payloads for admin panel requests
 
     //Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
-    if ((verdict = scanTraffic(fd, request, connection)) != 0) {
+    if ((verdict = scanTraffic(request)) != 0) {
         buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
         return;
     } 
 
     //Traffic validated, make forwarded request and buffer back
 
-    char redirectUrl[8192], redirectRequest[8192];
-    sprintf(redirectUrl, "%s%s", "https://example.com", path);
+    // prob need to delete
+    //char redirectUrl[8192], redirectRequest[8192];
+    //sprintf(redirectUrl, "%s%s", "https://example.com", path);
 
     //make forwarded request, write to file
     //https://stackoverflow.com/questions/11208299/how-to-make-an-http-get-request-in-c-without-libcurl
@@ -362,11 +446,13 @@ static void serveRequest(int fd, const char *request, const char *connection) {
 
     inet_pton(AF_INET, FORWARD, &addr.sin_addr);
 
-    if(connect(fwsock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        buildResponse(fd, 500, 0, "text/plain", "close");
+    if (connect(fwsock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(fwsock);
+        buildResponse(fd, 502, 0, "text/plain", "close");
         return;
     }
 
+    /*
     // form request
     int reqlen = snprintf(redirectRequest, 1024, "GET %s HTTP/1.1\r\nHost: %s:%s\r\nConnection: close\r\n\r\n", path, FORWARD, FORWARD_PORT);
     // write request
@@ -382,6 +468,13 @@ static void serveRequest(int fd, const char *request, const char *connection) {
         }
         nbytes_total += nbytes_last;
     }
+    */
+    // I'm pretty sure you just need to do this
+    if (sendall(fwsock, request, requestLength) < 0) {
+        close(fwsock);
+        buildResponse(fd, 502, 0, "text/plain", "close");
+        return;
+    }
     
     // read response directly to buffer
     int n;
@@ -393,7 +486,8 @@ static void serveRequest(int fd, const char *request, const char *connection) {
     }
     
     //Must send after for exact content size.
-    buildResponse(fd, 200, n, "text/html", connection); //specific minetype can be adjusted later, for now assuming most is gonna be html
+    // if we do the above, then we don't need this
+   // buildResponse(fd, 200, n, "text/html", connection); //specific minetype can be adjusted later, for now assuming most is gonna be html
     close(fwsock);
 }
 
@@ -448,19 +542,24 @@ static void *connectThread(void *raw_args)
     // ;; for persistent mode, it should continue to process requests until the client closes the connection or the connection times out.
     for (;;) {
         int result = readRequest(clientFd, request, sizeof(request));
-        if (result <= 0)
+        if (result == 0)
+            break;
+        if (result == -1)
             break;
         if (result == -2) {
             buildResponse(clientFd, 400, 0, "text/plain", "close");
             break;
         }
+        if (result == -3) {
+            buildResponse(clientFd, 413, 0, "text/plain", "close");
+        }
 
         if (!persistent || closeRequest(request)) {
-            serveRequest(clientFd, request, "close");
+            serveRequest(clientFd, request, (size_t)result, "close");
             break;
         }
 
-        serveRequest(clientFd, request, "keep-alive");
+        serveRequest(clientFd, request, (size_t)result, "keep-alive");
     }
 
     close(clientFd);
