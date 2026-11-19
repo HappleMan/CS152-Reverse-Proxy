@@ -32,6 +32,7 @@ go back to blocking on accept
 #include <sys/time.h>
 #include <ctype.h>
 #include <limits.h>
+#include <time.h>
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
@@ -510,6 +511,37 @@ static int closeRequest(const char *request) {
 }
 
 /**
+ * convert the socket address of a client from binary to readable IP address
+ * @param address pointer to the client's sockaddr_storage address
+ * @param output output buffer
+ * @param outputSize size of buffer
+ * @return 0 on success, -1 if address cannot be converted or is not supported
+ */
+static int getIPAddr(const struct sockaddr_storage *address, char *output, size_t outputSize) {
+    void *addressData;
+
+    if (address->ss_family == AF_INET) { // what kind of address is this
+        struct sockaddr_in *ipv4;
+
+        ipv4 = (struct sockaddr_in *)address;
+        addressData = &ipv4->sin_addr; // sin_addr = IPv4 address
+    } else if (address->ss_family == AF_INET6) { // what kind of address is it
+        struct sockaddr_in6 *ipv6;
+
+        ipv6 = (struct sockaddr_in6 *)address;
+        addressData = &ipv6->sin6_addr; // sin6_addr = IPv6 address
+    } else {
+        return -1;
+    }
+
+    if (inet_ntop(address->ss_family, addressData, output, outputSize) == NULL) { // inet_ntop = the conversion
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
  * Handles one client connection.
  *
  * In persistent mode, this function can process multiple HTTP requests on
@@ -526,8 +558,15 @@ static void *connectThread(void *raw_args)
     struct connection_args *args = raw_args;
     int clientFd = args->fd;
     int persistent = args->persistent;
+    char clientIP[INET6_ADDRSTRLEN]; // minimun buffer needed for a IPv6
     char request[MAX_REQUEST];
     struct timeval timeout = { TIMEOUT, 0 };
+
+
+    if (getIPAddr(&args->address, clientIP, sizeof(clientIP)) < 0) {
+        strcpy(clientIP, "unknown");
+    }
+
 
     // The accepted socket is stored in heap memory because the main thread passes it to a detached thread. The thread is responsible for freeing the structure and closing the socket.
     free(args);
@@ -610,6 +649,39 @@ static int makeListener(void)
 
     freeaddrinfo(results);
     return fd;
+}
+
+/**
+ * Logs an event(access to a special endpoint)
+ * @param ip ip address of the requesting client
+ * @param method method of the request
+ * @param path requested path
+ * @param reason why we logged the access
+ */
+static void logEvent(const char *ip, const char *method, const char *path, const char *reason) {
+    FILE *logFile;
+    time_t now;
+    struct tm timeInfo;
+    char timestamp[64];
+
+    now = time(NULL);
+    localtime_r(&now, &timeInfo);
+
+    strftime(timestamp,
+             sizeof(timestamp),
+             "%Y-%m-%d %H:%M:%S",
+             &timeInfo);
+
+    logFile = fopen("proxy.log", "a");
+
+    if (logFile == NULL) {
+        perror("fopen proxy.log");
+        return;
+    }
+
+    fprintf(logFile, "[%s] IP=%s Method=%s Path=%s Reason=%s\n", timestamp, ip, method, path, reason);
+
+    fclose(logFile);
 }
 
 int main(int argc, char **argv)
