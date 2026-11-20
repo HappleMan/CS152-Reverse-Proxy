@@ -357,6 +357,43 @@ static int scanTraffic(const char *request) {
     return verdict;
 }
 
+/**
+ * Logs an event(access to a special endpoint)
+ * @param ip ip address of the requesting client
+ * @param method method of the request
+ * @param path requested path
+ * @param flagged whether the access was flagged
+ * @param reason why we logged the access
+ */
+static int logEvent(const char *ip, const char *method, const char *path, const int flagged, const char *reason) {
+    FILE *logFile;
+    time_t now;
+    struct tm timeInfo;
+    char timestamp[64];
+
+    now = time(NULL);
+    localtime_r(&now, &timeInfo);
+
+    strftime(timestamp,
+             sizeof(timestamp),
+             "%Y-%m-%d %H:%M:%S",
+             &timeInfo);
+
+    logFile = fopen("proxy.log", "a");
+
+    if (logFile == NULL) {
+        perror("fopen proxy.log");
+        return 1;
+    }
+    //Switching formatting to csv for ease of parsing later.
+    //timestamp, date, ip, method, path, flagged, reason
+    fprintf(logFile, "%ld,%s,%s,%s,%s,%d,%s\n", now,timestamp, ip, method, path, flagged, reason);
+    
+    //fprintf(logFile, "[%s] IP=%s Method=%s Path=%s Reason=%s\n", timestamp, ip, method, path, reason);
+
+    fclose(logFile);
+    return 0;
+}
 
 /**
  * Processes one HTTP request and sends the appropriate response.
@@ -369,7 +406,7 @@ static int scanTraffic(const char *request) {
  * @param request     Raw HTTP request.
  * @param connection  Value for the HTTP Connection header.
  */
-static void serveRequest(int fd, const char *request, size_t requestLength, const char *connection) {
+static void serveRequest(int fd, const char *request, size_t requestLength, const char *connection, char* clientIP) {
     char buf[BUFFERSIZE];
     char method[16];
     char version[16];
@@ -408,9 +445,16 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
     //Determine if requesting the admin panel. I was gonna use a switch case but C switch and strings are not friends.
     if (strcmp(path, "/reverse_proxy/admin") == 0) { // TODO: Maybe add authentication
-        char adminPath[PATH_MAX];
-        snprintf(adminPath, sizeof(adminPath), "%s/admin.html", webroot);
-        if (returnFile(fd, connection, adminPath) == 0) {
+        //char adminPath[PATH_MAX];
+        //snprintf(adminPath, sizeof(adminPath), "%s/admin.html", webroot);
+        if (returnFile(fd, connection, "admin.html") == 0) { //This is correct because it's on the side of the reverse proxy, not the end server.
+            return;
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    } else if (strcmp(path, "/reverse_proxy/get_data") == 0) { //Get data to populate admin webpage
+        if (returnFile(fd, connection, "proxy.log") == 0) { //Placeholder
             return;
         }
 
@@ -420,11 +464,14 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
     //Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
     if ((verdict = scanTraffic(request)) != 0) {
+
         buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
         return;
-    } 
-
+    }
+    
     //Traffic validated, make forwarded request and buffer back
+    if (strcmp(path, "/favicon.ico") != 0)
+        logEvent(clientIP, method, path, 0, "none");
 
     // prob need to delete
     //char redirectUrl[8192], redirectRequest[8192];
@@ -594,11 +641,11 @@ static void *connectThread(void *raw_args)
         }
 
         if (!persistent || closeRequest(request)) {
-            serveRequest(clientFd, request, (size_t)result, "close");
+            serveRequest(clientFd, request, (size_t)result, "close", clientIP);
             break;
         }
 
-        serveRequest(clientFd, request, (size_t)result, "keep-alive");
+        serveRequest(clientFd, request, (size_t)result, "keep-alive", clientIP);
     }
 
     close(clientFd);
@@ -649,39 +696,6 @@ static int makeListener(void)
 
     freeaddrinfo(results);
     return fd;
-}
-
-/**
- * Logs an event(access to a special endpoint)
- * @param ip ip address of the requesting client
- * @param method method of the request
- * @param path requested path
- * @param reason why we logged the access
- */
-static void logEvent(const char *ip, const char *method, const char *path, const char *reason) {
-    FILE *logFile;
-    time_t now;
-    struct tm timeInfo;
-    char timestamp[64];
-
-    now = time(NULL);
-    localtime_r(&now, &timeInfo);
-
-    strftime(timestamp,
-             sizeof(timestamp),
-             "%Y-%m-%d %H:%M:%S",
-             &timeInfo);
-
-    logFile = fopen("proxy.log", "a");
-
-    if (logFile == NULL) {
-        perror("fopen proxy.log");
-        return;
-    }
-
-    fprintf(logFile, "[%s] IP=%s Method=%s Path=%s Reason=%s\n", timestamp, ip, method, path, reason);
-
-    fclose(logFile);
 }
 
 int main(int argc, char **argv)

@@ -1,1 +1,133 @@
-hai
+<!doctype html>
+<html>
+<head>
+    <title>Reverse Proxy</title>
+    <style>
+        body {
+            background-color: white;
+            color: black;
+            font-family: monospace;
+        }
+        
+        .bordered {
+            width: 95 vw;
+            min-height: 50px;
+            padding: 0;
+            border-radius: 5;
+            border-color: lightgray;
+            border-style: double;
+            border-width: 1px;
+            padding: 0 10px;
+            margin-bottom: 15px;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+
+        td,th {
+            border: 1px solid;
+        }
+
+        .flagged td {
+            background-color: rgb(255, 207, 207);
+        }
+    </style>
+    <script>
+        var base_url = document.URL.split("reverse_proxy")[0] + "reverse_proxy/";
+        
+        //timestamp    date,ip,method,path,flagged,reason
+        data = []
+        max_rows = 25
+
+        function search() {
+            table = `<tr>
+                <th>Date</th>
+                <th>IP Address</th>
+                <th>Request Method</th>
+                <th>Request Path</th>
+                <th>Flagged</th>
+                <th>Reason</th>
+            </tr>\n`;
+
+            count = 0;
+
+            for (d in data) {
+                //console.log(d)
+                l = data[d].split(",")
+                //console.log(l)
+                flagged = ""
+
+                if (((l[5] == "1" && document.getElementById("filterflagged")) || !document.getElementById("filterflagged").checked) && data[d].includes(document.getElementById("searchbox").value)){
+                    if (l[5] == "1") {
+                        flagged = " class='flagged'"
+                        l[5] = "Flagged"
+                    } else {
+                        l[5] = ""
+                    }
+                    table = table + `<tr` + flagged + `>
+                        <td>` + l[1] + `</td>
+                        <td>` + l[2] + `</td>
+                        <td>` + l[3] + `</td>
+                        <td>` + l[4] + `</td>
+                        <td>` + l[5] + `</td>
+                        <td>` + l[6] + `</td>
+                        </tr>\n`
+                    count += 1;
+                }
+
+                if (count >= max_rows) break
+            }
+
+            document.getElementById("activityTable").innerHTML = table;
+        }
+
+        function refreshTraffic() {
+            var json = new XMLHttpRequest();
+            json.open("GET", base_url + "get_data");
+            //json.setRequestHeader('Authorization', auth_key);
+            json.send();
+            
+            json.onreadystatechange = function(ddata) {
+                data = json.responseText.split("\n");
+                data.pop()
+                data.reverse()
+                data.pop()
+                //console.log(data);
+                //document.getElementById("searchterm").value = "";
+                search();
+            }
+        }
+        
+        window.onload = function() {
+            refreshTraffic();
+        }
+    </script>
+</head>
+<body>
+    <center><h1>Reverse Proxy Administration</h1></center>
+    <div class="bordered">
+        <center><h2>Recent Activity</h2></center>
+        <button onclick="search()">Search</button>
+        <label>Filter: </label><input type="text" id="searchbox">
+        <label>Only Show Flagged: </label><input type="checkbox" id="filterflagged">
+        <table id="activityTable">
+            <tr>
+                <th>Date</th>
+                <th>IP Address</th>
+                <th>Request Path</th>
+                <th>Request Method</th>
+                <th>Flagged</th>
+                <th>Reason</th>
+            </tr>
+            
+        </table>
+    </div>
+    <div class="bordered">
+        <center><h2>Flagged Endpoints</h2></center>
+        TODO: Show endpoints which are flagged such as robots.txt, llms.txt, ..
+        <br> Allow user to add or delete entry
+    </div>
+</body>
+</html>
