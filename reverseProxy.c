@@ -33,6 +33,7 @@ go back to blocking on accept
 #include <ctype.h>
 #include <limits.h>
 #include <time.h>
+#include <stdbool.h>
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
@@ -40,6 +41,10 @@ go back to blocking on accept
 #define FORWARD "127.0.0.1"
 #define FORWARD_PORT "8080"
 #define MAX_BODY 1048576
+#define MAX_CLIENTS 1024
+#define MAX_HISTORY 1024
+#define ACCESS_WINDOW 10 // 10 seconds for now for testing. will change later to probably 1 hour
+#define MAX_ACCESS_THRESHOLD 10 // just say that 10 accesses in 10 seconds is reportable, can change later
 
 // Default directory containing files served by the origin server.
 #define ROOT "./www"
@@ -56,6 +61,12 @@ go back to blocking on accept
 // Canonical path of the webroot, initialized in main.
 static char webroot[PATH_MAX];
 
+// need to lock threads to prevent overriding for log.csv
+static pthread_mutex_t logMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// need to lock threads to prevent overriding for the different clients
+static pthread_mutex_t clientsMutex = PTHREAD_MUTEX_INITIALIZER;
+
 /*
  * Information passed from the main accept loop to a client thread.
  *
@@ -68,6 +79,102 @@ struct connection_args { // instead of the dict
     struct sockaddr_storage address;
     int persistent;
 };
+
+struct get_event {
+    time_t timestamp;
+    char path[1024]; // only the path so we don't have to worry about any memory from pointing to the request
+};
+
+struct client_info { // per client, has the client's IP address, the event history, and how many counts of access
+    int used; // used for the clients array: 0 for empty, 1 for has a client
+    char ip[INET6_ADDRSTRLEN];
+    struct get_event history[MAX_HISTORY]; // client's requests
+    size_t history_size;
+};
+
+static struct client_info clients[MAX_CLIENTS]; // list of clients
+
+/**
+ * Looks through the list of clients to see if the client we're looking at is already in the list and if not, adds them
+ * @param ip IP address of the client we're looking for
+ * @return the struct of the client we're looking for
+ */
+static struct client_info *getClient(const char *ip) {
+    size_t unused = MAX_CLIENTS;
+
+    // go through the client list to see if they're already in it
+    for (size_t i = 0; i < MAX_CLIENTS; i++) {
+        // if the client at index i is used and their IP address matches the IP we're comparing, that's the client we want
+        if (clients[i].used && strcmp(clients[i].ip, ip) == 0) {
+            return &clients[i];
+        }
+
+        // if we don't find the match, and we haven't changed unused yet, set unused to the index of the first empty spot
+        if (!clients[i].used && unused == MAX_CLIENTS) {
+            unused = i;
+        }
+    }
+
+    // if we go through the entire list and we didn't change unused then something happened, like the list is full.
+    if (unused == MAX_CLIENTS) {
+        return NULL;
+    }
+
+    clients[unused].used = 1; // set used to 1 to say there's a client there now
+
+    // copy the IP address into the IP address field
+    strncpy(clients[unused].ip, ip,sizeof(clients[unused].ip) - 1);
+
+    // replace last char with null
+    clients[unused].ip[sizeof(clients[unused].ip) - 1] = '\0';
+
+    // set the history_size to 0 since the client is just being added
+    clients[unused].history_size = 0;
+
+    return &clients[unused]; // return the new client
+}
+
+/**
+ * Looks at the path of the request to see if it contains a specified endpoint
+ * @param path path to look at and see if it contains any of the special endpoints
+ * @return 1 for contains a special endpoint and 0 for does not contain the special endpoint
+ */
+static int isSpecialEndpoint(const char *path) {
+    const char *specialEndpoints[] = {"/robots.txt", "/llms.txt", "/sitemap.xml"};
+
+    // only compare up to '?' so that the comparison doesn't include queries
+    size_t pathLength = strcspn(path, "?");
+    size_t endpointCount = sizeof(specialEndpoints) / sizeof(specialEndpoints[0]);
+
+    // go through the list of special endpoints to see if the path contains any of them
+    for (size_t i = 0; i < sizeof(specialEndpoints); i++) {
+        if (strlen(specialEndpoints[i]) == pathLength && strncmp(path,specialEndpoints[i], pathLength) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Detects rapid access of special endpoints
+ * @param client specific client we're looking at
+ * @param now time to compare the timestamp to for the access window
+ * @return
+ */
+static bool detectRapidIndexing(const struct client_info *client, time_t now) {
+    size_t pageCount = 0;
+    // go through the client's history to get the age of each entry to see if it's inside the access window and if it is, see if it's an access to a special endpoint
+    for (size_t i = 0; i < client->history_size; i++) {
+        time_t age = now - client->history[i].timestamp;
+
+        // if the age is within the access window and is one of the special endpoints, then add 1 to the number of special accesses
+        if (age <= ACCESS_WINDOW && isSpecialEndpoint(client->history[i].path)) {
+            pageCount++;
+        }
+    }
+    return pageCount >= MAX_ACCESS_THRESHOLD;
+}
 
 // mimic the sendall function
 // https://stackoverflow.com/questions/11213579/python-sendall-vs-c-write idea for making this
@@ -269,7 +376,7 @@ static int readRequest(int fd, char *request, size_t requestLength) {
             return -1;
         }
 
-        if (received = 0) {
+        if (received == 0) {
             return -1;
         }
 
@@ -422,6 +529,7 @@ static char* verdictReason(int verdict) {
  * @param reason why we logged the access
  */
 static int logEvent(const char *ip, const char *method, const char *path, const int flagged, const char *reason) {
+    pthread_mutex_lock(&logMutex); // need to lock so that multiple threads try to write to log.csv at the same time
     FILE *logFile;
     time_t now;
     struct tm timeInfo;
@@ -438,6 +546,7 @@ static int logEvent(const char *ip, const char *method, const char *path, const 
     logFile = fopen("log.csv", "a");
 
     if (logFile == NULL) {
+        pthread_mutex_unlock(&logMutex);
         perror("fopen log.csv");
         return 1;
     }
@@ -448,6 +557,8 @@ static int logEvent(const char *ip, const char *method, const char *path, const 
     //fprintf(logFile, "[%s] IP=%s Method=%s Path=%s Reason=%s\n", timestamp, ip, method, path, reason);
 
     fclose(logFile);
+
+    pthread_mutex_unlock(&logMutex);
     return 0;
 }
 
@@ -694,6 +805,7 @@ static void *connectThread(void *raw_args)
         }
         if (result == -3) {
             buildResponse(clientFd, 413, 0, "text/plain", "close");
+            break;
         }
 
         if (!persistent || closeRequest(request)) {
