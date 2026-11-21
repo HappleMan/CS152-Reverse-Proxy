@@ -350,11 +350,67 @@ static int returnFile(int fd, const char *connection, char *path) {
  */
 // static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
 
-static int scanTraffic(const char *request) {
-    int verdict = 0;
+static int scanTraffic(char* clientIP, char* path) {
+    //int verdict = 0;
 
+    //Check path
+
+    //Check ip
+    FILE *file;
+    struct stat fileInfo;
+    size_t bytesRead;
+
+    if (stat("blacklist.csv", &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
+        return -1;
+    }
+
+    file = fopen("blacklist.csv", "w+");
+    if (file == NULL) {
+        return -1;
+    }
     
-    return verdict;
+    
+    // Tried doing this 11/20, no success
+    // int buf;
+    // char line[512] = "";
+    // int index = 0;
+    // while ((int)(buf = fgetc(file)) != -100)
+    // {
+    //     if (buf != '\n') {
+    //         line[index] = buf;
+    //         index++;
+    //         printf("%d\n", buf);
+    //         break;
+    //     }
+    //     else
+    //     {
+    //         char ip[INET6_ADDRSTRLEN];
+    //         char reason[MAX_BODY];
+    //         time_t exp;
+    //         sscanf(line, "%s,%s,%ld", ip, reason, &exp);
+    //         if (strcmp(clientIP, ip) == 0)
+    //         {
+    //             time_t now = time(NULL);
+    //             if (exp == 0 || exp > now) {
+    //                 return 1;
+    //             }
+    //         }
+    //         memset(line, 0, sizeof(line)); //reset
+    //     }
+    // }
+
+    fclose(file);
+    
+    return 0; //allowed!
+}
+
+static char* verdictReason(int verdict) {
+    switch(verdict) {
+        case 0: return "none";
+        case 1: return "Blacklisted address";
+        case 2: return "Suspicious activity";
+        default: return "Server error";
+    }
 }
 
 /**
@@ -379,10 +435,10 @@ static int logEvent(const char *ip, const char *method, const char *path, const 
              "%Y-%m-%d %H:%M:%S",
              &timeInfo);
 
-    logFile = fopen("proxy.log", "a");
+    logFile = fopen("log.csv", "a");
 
     if (logFile == NULL) {
-        perror("fopen proxy.log");
+        perror("fopen log.csv");
         return 1;
     }
     //Switching formatting to csv for ease of parsing later.
@@ -454,7 +510,7 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
     } else if (strcmp(path, "/reverse_proxy/get_data") == 0) { //Get data to populate admin webpage
-        if (returnFile(fd, connection, "proxy.log") == 0) { //Placeholder
+        if (returnFile(fd, connection, "log.csv") == 0) { //Placeholder
             return;
         }
 
@@ -463,14 +519,14 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     }// TODO: accept payloads for admin panel requests
 
     //Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
-    if ((verdict = scanTraffic(request)) != 0) {
-
+    if ((verdict = scanTraffic(clientIP, path)) != 0) {
+        logEvent(clientIP, method, path, verdict, verdictReason(verdict));
         buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
         return;
     }
     
     //Traffic validated, make forwarded request and buffer back
-    if (strcmp(path, "/favicon.ico") != 0)
+    if (strcmp(path, "/favicon.ico") != 0) //Browser just requests this repeatedly, best not to log
         logEvent(clientIP, method, path, 0, "none");
 
     // prob need to delete
@@ -701,14 +757,16 @@ static int makeListener(void)
 int main(int argc, char **argv)
 {
     // Get the mode from the command-line argument
-    const char *mode = argc > 1 ? argv[1] : "persistent";
-    int persistent = strcmp(mode, "persistent") == 0;
-    int single_threaded = strcmp(mode, "single-threaded") == 0;
-    int listener;
+    const char *mode = argc > 1 ? argv[1] :
+            "persistent";
+            int persistent = strcmp(mode, "persistent") == 0;
+            int single_threaded = strcmp(mode, "single-threaded") == 0;
+            int listener;
 
-    if (!persistent && !single_threaded && strcmp(mode, "non-persistent") != 0) {
-        return EXIT_FAILURE;
-    }
+            if (!persistent && !single_threaded && strcmp(mode, "non-persistent") != 0)
+            {
+                return EXIT_FAILURE;
+            }
 
     // Resolve the web root to give pathCheck() a directory to compare with files.
     const char *rootArgument = argc > 2 ? argv[2] : ROOT;
