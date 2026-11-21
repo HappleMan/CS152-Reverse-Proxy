@@ -463,6 +463,43 @@ static int scanTraffic(char* clientIP, char* path) {
     //Check path
 
     //Check ip
+
+    time_t now = time(NULL);
+    struct client_info *client;
+    bool rapid;
+
+    pthread_mutex_lock(&clientsMutex);
+
+    client = getClient(clientIP);
+
+    if (client == NULL) {
+        pthread_mutex_unlock(&clientsMutex);
+        return -1;
+    }
+
+    // get rid of oldest entry if the history is full
+    if (client->history_size >= MAX_HISTORY) {
+        memmove(client->history, client->history + 1, (MAX_HISTORY - 1) * sizeof(client->history[0]));
+        client->history_size = MAX_HISTORY - 1;
+    }
+
+    // add to the client's history
+    client->history[client->history_size].timestamp = now;
+
+    strncpy(client->history[client->history_size].path, path, sizeof(client->history[client->history_size].path) - 1);
+
+    client->history[client->history_size].path[sizeof(client->history[client->history_size].path) - 1] = '\0';
+
+    client->history_size++;
+
+    rapid = detectRapidIndexing(client, now);
+
+    pthread_mutex_unlock(&clientsMutex);
+
+    if (rapid) {
+        return 2; //
+    }
+
     FILE *file;
     struct stat fileInfo;
     size_t bytesRead;
