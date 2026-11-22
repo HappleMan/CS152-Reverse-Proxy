@@ -144,6 +144,9 @@ static struct client_info *getClient(const char *ip) {
 
     // set the history_size to 0 since the client is just being added
     clients[unused].history_size = 0;
+    clients[unused].violations = 0;
+    clients[unused].last_special = 0;
+    clients[unused].next_sequence = 0;
 
     return &clients[unused]; // return the new client
 }
@@ -168,7 +171,10 @@ static int isSpecialEndpoint(const char *path) {
     while (fgets(line, sizeof(line), file) != NULL) {
         char ln[256];
         if (sscanf(line, "%255[^,]", ln) == 1) {
-            ln[strlen(ln) - 1] =  '\0';
+            ln[strcspn(ln, "\r\n")] = '\0';
+            if (ln[0] == '\0') {
+                continue;
+            }
             
             if (strcmp(path, ln) == 0)
             { // if the line is equal to the path
@@ -849,10 +855,13 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
-    } else if (strstr(path, "/reverse_proxy/add_special_endpoint") != NULL) { //Get data to populate admin webpage
+    } else if (strncmp(path, "/reverse_proxy/add_special_endpoint", strlen("/reverse_proxy/add_special_endpoint")) == 0) { //Get data to populate admin webpage
         char halfPath[1024];
         char arg[1024];
-        sscanf(path, "%1023[^=]=%s[^\n]", halfPath, arg);
+        if (sscanf(path, "%1023[^=]=%1023[^\r\n]", halfPath, arg) != 2) {
+            buildResponse(fd, 400, 0, "text/plain", connection);
+            return;
+        }
         printf("%s\n", arg);
         if (strlen(arg) != 0)
         {
@@ -867,19 +876,31 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     }
 
     // Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
-    int violatioCount = 0;
-    if ((verdict = scanTraffic(clientIP, path, NULL, &violatioCount, NULL)) != 0)
-    {
-        char reason[MAX_BODY];
-        sprintf(reason, "Violation #%d: %s", violatioCount, verdictReason(verdict));
-        logEvent(clientIP, method, path, verdict, reason);
-        buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
+    size_t rapidCount = 0;
+    int violationCount = 0;
+    int newViolation = 0;
+
+    verdict = scanTraffic(clientIP, path, &rapidCount, &violationCount, &newViolation);
+
+    if (newViolation) {
+        char reason[256];
+        snprintf(reason, sizeof(reason), "Rapid violation #%d: %zu requests in %d seconds", violationCount, rapidCount, ACCESS_WINDOW);
+        logEvent(clientIP, method, path, 2, reason);
+    }
+
+    if (verdict == 1 || verdict == 2) {
+        if (!newViolation) {
+            logEvent(clientIP, method, path, verdict, verdictReason(verdict));
+        }
+        buildResponse(fd, 403, 0, "text/plain", connection);
         return;
     }
 
     //Traffic validated, make forwarded request and buffer back
-    if (strcmp(path, "/favicon.ico") != 0) //Browser just requests this repeatedly, best not to log
+    //Browser just requests this repeatedly, best not to log
+    if (!newViolation && verdict == 0 && strcmp(path, "/favicon.ico") != 0) {
         logEvent(clientIP, method, path, 0, "none");
+    }
 
     // prob need to delete
     //char redirectUrl[8192], redirectRequest[8192];
