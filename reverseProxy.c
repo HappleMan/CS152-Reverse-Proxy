@@ -146,6 +146,9 @@ static struct client_info *getClient(const char *ip) {
 
     // set the history_size to 0 since the client is just being added
     clients[unused].history_size = 0;
+    clients[unused].violations = 0;
+    clients[unused].last_special = 0;
+    clients[unused].next_sequence = 0;
 
     return &clients[unused]; // return the new client
 }
@@ -170,7 +173,10 @@ static int isSpecialEndpoint(const char *path) {
     while (fgets(line, sizeof(line), file) != NULL) {
         char ln[256];
         if (sscanf(line, "%255[^,]", ln) == 1) {
-            ln[strlen(ln) - 1] =  '\0';
+            ln[strcspn(ln, "\r\n")] = '\0';
+            if (ln[0] == '\0') {
+                continue;
+            }
             
             if (strcmp(path, ln) == 0)
             { // if the line is equal to the path
@@ -467,6 +473,53 @@ static long getContentLength(const char *request) {
 
     return length;
 }
+
+/**
+ * Finds the body of a HTTP request by looking after
+ * headers\r\n
+ * \r\n
+ * body
+ * Find the empty line and use the content length to see how many bytes are in the body. *body points to the request/.
+ * @param request the request we're looking at
+ * @param requestLength number of bytes in the request
+ * @param body pointer to the beginning of the body
+ * @param bodyLength size of the body in bytes
+ * @return 0 on success, -1 on any sort of error
+ */
+static int getPayload(const char *request, size_t requestLength, const char **body, size_t *bodyLength) {
+    const char *bodyStart;
+    long contentLength;
+
+    // HTTP headers have a blank line followed by \r\n\r\n so then strstr points to the beginning of the sequence
+    bodyStart = strstr(request, "\r\n\r\n");
+
+    // error check(no \r\n\r\n)
+    if (bodyStart == NULL) {
+        return -1;
+    }
+
+    bodyStart += 4; // move past \r\n\r\n
+
+    contentLength = getContentLength(request);
+
+    // if getContentLength is <0, something happened and we shouldn't continue
+    if (contentLength < 0) {
+        return -1;
+    }
+
+    // make sure that the complete body is in the request by checking bytes before the body + bytes in the body > thrn the request
+    if ((size_t)(bodyStart - request) + (size_t)contentLength > requestLength) {
+        return -1;
+    }
+
+
+    // "return" a pointer to the body to look at the body in place
+    *body = bodyStart;
+    *bodyLength = (size_t)contentLength;
+
+    return 0;
+}
+
 /**
  * Reads an HTTP request from a connected client socket.
  *
@@ -934,10 +987,13 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
-    } else if (strstr(path, "/reverse_proxy/add_special_endpoint") != NULL) { //Get data to populate admin webpage
+    } else if (strncmp(path, "/reverse_proxy/add_special_endpoint", strlen("/reverse_proxy/add_special_endpoint")) == 0) { //Get data to populate admin webpage
         char halfPath[1024];
         char arg[1024];
-        sscanf(path, "%1023[^=]=%s[^\n]", halfPath, arg);
+        if (sscanf(path, "%1023[^=]=%1023[^\r\n]", halfPath, arg) != 2) {
+            buildResponse(fd, 400, 0, "text/plain", connection);
+            return;
+        }
         printf("%s\n", arg);
         if (strlen(arg) != 0)
         {
@@ -975,21 +1031,33 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     }
 
     // Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
-    int violatioCount = 0;
-    if ((verdict = scanTraffic(clientIP, path, method, request, NULL, &violatioCount, NULL)) != 0)
-    {
-        char reason[MAX_BODY];
-        sprintf(reason, "Violation #%d: %s", violatioCount, verdictReason(verdict));
-        logEvent(clientIP, method, path, verdict, reason);
-        buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
+    size_t rapidCount = 0;
+    int violationCount = 0;
+    int newViolation = 0;
+
+    verdict = scanTraffic(clientIP, path, &rapidCount, &violationCount, &newViolation);
+
+    if (newViolation) {
+        char reason[256];
+        snprintf(reason, sizeof(reason), "Rapid violation #%d: %zu requests in %d seconds", violationCount, rapidCount, ACCESS_WINDOW);
+        logEvent(clientIP, method, path, 2, reason);
+    }
+
+    if (verdict == 1 || verdict == 2) {
+        if (!newViolation) {
+            logEvent(clientIP, method, path, verdict, verdictReason(verdict));
+        }
+        buildResponse(fd, 403, 0, "text/plain", connection);
         return;
     }
 
 
 
     //Traffic validated, make forwarded request and buffer back
-    if (strcmp(path, "/favicon.ico") != 0) //Browser just requests this repeatedly, best not to log
+    //Browser just requests this repeatedly, best not to log
+    if (!newViolation && verdict == 0 && strcmp(path, "/favicon.ico") != 0) {
         logEvent(clientIP, method, path, 0, "none");
+    }
 
     // prob need to delete
     //char redirectUrl[8192], redirectRequest[8192];
