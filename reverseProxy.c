@@ -734,7 +734,8 @@ static int isBlacklisted(const char *clientIP) {
  */
 // static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
 
-static int scanTraffic(char* clientIP, char* path, char* method, const char* request, size_t* rapidCountOut, int* violationCountOut, int* newViolationOut) {
+static int scanTraffic(const char *clientIP, const char *path, size_t *rapidCountOut, int *violationCountOut, int *newViolationOut) {
+//static int scanTraffic(char* clientIP, char* path, char* method, const char* request, size_t* rapidCountOut, int* violationCountOut, int* newViolationOut) {
     //int verdict = 0;
 
     //Check path
@@ -905,6 +906,17 @@ static int logEvent(const char *ip, const char *method, const char *path, const 
 }
 
 /**
+ * Pangram has different APIs for text and images so need to make sure to one used with text has text
+ * @param request the HTTP request
+ * @return 0 on success for a content type of text or json
+ */
+static int isText(const char *request) {
+    return strcasestr(request, "Content-Type: text/") != NULL || strcasestr(request, "Content-Type: application/json") != NULL;
+}
+
+
+
+/**
  * Processes one HTTP request and sends the appropriate response.
  *
  * This function parses the request line, verifies that the method is GET,
@@ -932,14 +944,12 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         buildResponse(fd, 400, 0, "text/plain", "close");
         return;
     }
-    
+
     if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0 && strcmp(method, "POST") != 0 && strcmp(method, "PUT") != 0 &&
     strcmp(method, "PATCH") != 0 && strcmp(method, "DELETE") != 0 && strcmp(method, "OPTIONS") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
         return;
     }
-    
-
 
     // https://man7.org/linux/man-pages/man3/realpath.3.html
     /*
@@ -947,18 +957,18 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     * The URL is not an absolute path.
     * It exceeds fullPath.
     */
-   
+
    if (path[0] != '/' || snprintf(fullPath, sizeof(fullPath),
    "%s%s", webroot, path) >= sizeof(fullPath)) {
        buildResponse(fd, 404, 0, "text/plain", connection);
        return;
     }
-    
+
     //Determine if requesting the admin panel. I was gonna use a switch case but C switch and strings are not friends.
     if (strcmp(path, "/reverse_proxy/admin") == 0) { // TODO: Maybe add authentication
         //char adminPath[PATH_MAX];g
         //snprintf(adminPath, sizeof(adminPath), "%s/admin.html", webroot);
-        
+
         if (returnFile(fd, connection, "admin.html") == 0)
         { // This is correct because it's on the side of the reverse proxy, not the end server.
             return;
@@ -1005,29 +1015,6 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
-    } else if (strcmp(path, "/reverse_proxy/get_ai_detection_endpoints") == 0) { //Get data to populate admin webpage
-        if (returnFile(fd, connection, "specialEndpoints.csv") == 0) { //Placeholder
-            return;
-        }
-
-        buildResponse(fd, 500, 0, "text/plain", "close");
-        return;
-    } else if (strstr(path, "/reverse_proxy/add_ai_detection_endpoint") != NULL) { //Get data to populate admin webpage
-        char halfPath[1024];
-        char arg[1024];
-        char ind[1024];
-        sscanf(path, "%1023[^=]=%1023[^&]%1023[^=]=%1023[^&]", halfPath, arg, halfPath, ind);
-        printf("%s\n", arg);
-        if (strlen(arg) != 0 && strlen(ind) != 0)
-        {
-            if (addContentEndpoint(arg, ind) == 0) {
-                buildResponse(fd, 200, 0, "text/plain", "close");
-                return;
-            }
-        }
-
-        buildResponse(fd, 500, 0, "text/plain", "close");
-        return;
     }
 
     // Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
@@ -1051,12 +1038,30 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         return;
     }
 
-
-
     //Traffic validated, make forwarded request and buffer back
     //Browser just requests this repeatedly, best not to log
     if (!newViolation && verdict == 0 && strcmp(path, "/favicon.ico") != 0) {
         logEvent(clientIP, method, path, 0, "none");
+    }
+
+    // these request types almost always have a body(delete only sometimes)
+    if ((strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0 || strcmp(method, "DELETE") == 0) && isText(request)) {
+        const char *payload;
+        size_t payloadLength;
+        char pangramResult[128];
+
+        if (getPayload(request, requestLength, &payload, &payloadLength) == 0 && payloadLength > 0) {
+
+            int pangramStatus = checkTextWithPangram(payload, payloadLength, pangramResult, sizeof(pangramResult));
+
+            // checkTextWithPangram returns 0 if nothing went wrong
+            if (pangramStatus == 0) {
+                // put the result of the AI check. flag the AI content but don't ban, leave that to the admin
+                logEvent(clientIP, method, path,2, pangramResult);
+            } else {
+                logEvent(clientIP, method, path,0, "Pangram error");
+            }
+        }
     }
 
     // prob need to delete
@@ -1068,7 +1073,7 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
     struct sockaddr_in addr;
     int fwsock;
-    
+
     fwsock = socket(AF_INET, SOCK_STREAM, 0);
     if (fwsock < 0) {
         buildResponse(fd, 500, 0, "text/plain", "close");
@@ -1104,22 +1109,21 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     }
     */
     // I'm pretty sure you just need to do this
-    printf("%s\n", request);
     if (sendall(fwsock, request, requestLength) < 0) {
         close(fwsock);
         buildResponse(fd, 502, 0, "text/plain", "close");
         return;
     }
-    
+
     // read response directly to buffer
     int n;
-    
+
     while ((n = read(fwsock, buf, BUFFERSIZE)) > 0) {
         if (sendall(fd, buf, n) < 0)
 
-            break;
+        break;
     }
-    
+
     //Must send after for exact content size.
     // if we do the above, then we don't need this
    // buildResponse(fd, 200, n, "text/html", connection); //specific minetype can be adjusted later, for now assuming most is gonna be html
