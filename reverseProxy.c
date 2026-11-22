@@ -147,7 +147,7 @@ static int isSpecialEndpoint(const char *path) {
     size_t endpointCount = sizeof(specialEndpoints) / sizeof(specialEndpoints[0]);
 
     // go through the list of special endpoints to see if the path contains any of them
-    for (size_t i = 0; i < sizeof(specialEndpoints); i++) {
+    for (size_t i = 0; i < endpointCount; i++) {
         if (strlen(specialEndpoints[i]) == pathLength && strncmp(path,specialEndpoints[i], pathLength) == 0) {
             return 1;
         }
@@ -157,22 +157,39 @@ static int isSpecialEndpoint(const char *path) {
 }
 
 /**
- * Detects rapid access of special endpoints
+ * Detects access to a special endpoint and then rapid access to other pages
  * @param client specific client we're looking at
  * @param now time to compare the timestamp to for the access window
- * @return
+ * @return false for is there's no special endpoint entries or if the pageCount after the access is less than the threshold. Return true for if the number of pages that are accessed within the window meets the threshold.
  */
 static bool detectRapidIndexing(const struct client_info *client, time_t now) {
-    size_t pageCount = 0;
+    size_t latestSpecialIndex = MAX_HISTORY; // get the latest special endpoint access so then we can see rapid access to pages after
     // go through the client's history to get the age of each entry to see if it's inside the access window and if it is, see if it's an access to a special endpoint
     for (size_t i = 0; i < client->history_size; i++) {
         time_t age = now - client->history[i].timestamp;
-
         // if the age is within the access window and is one of the special endpoints, then add 1 to the number of special accesses
-        if (age <= ACCESS_WINDOW && isSpecialEndpoint(client->history[i].path)) {
+        if (age >= 0 && age <= ACCESS_WINDOW && isSpecialEndpoint(client->history[i].path)) {
+            latestSpecialIndex = i;
+        }
+    }
+
+    // if you go through the history and the latestSpecialIndex doesn't change or it's the latest entry, then there wasn't rapid access
+    if (latestSpecialIndex == MAX_HISTORY) {
+        return false;
+    }
+
+    size_t pageCount = 0; // keeps track of how many pages were accessed after the special endpoint
+
+    // start at the entry after the special endpoint to look at rapid access
+    for (size_t i = latestSpecialIndex + 1; i < client->history_size; i++) {
+        time_t age = now - client->history[i].timestamp;
+
+        // if the entry has an age within the window then increment the count
+        if (age >= 0 && age <= ACCESS_WINDOW && !isSpecialEndpoint(client->history[i].path)) {
             pageCount++;
         }
     }
+
     return pageCount >= MAX_ACCESS_THRESHOLD;
 }
 
@@ -446,6 +463,39 @@ static int returnFile(int fd, const char *connection, char *path) {
 }
 
 /**
+ * Checks the blacklist file to see if a client is blacklisted
+ * @param clientIP
+ * @return 1 for blacklisted client, 0 otherwise
+ */
+static int isBlacklisted(const char *clientIP) {
+    char line[512];
+    char ip[INET6_ADDRSTRLEN];
+    char reason[256];
+    long expiration;
+
+    FILE *file = fopen("blacklist.csv", "r");
+
+    if (file == NULL) {
+        return 0;
+    }
+
+    time_t now = time(NULL);
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        // sscanf returns how many values were read so if it's not 3, skip the line
+        if (sscanf(line, "%45[^,],%255[^,],%ld", ip, reason, &expiration) == 3) {
+            if (strcmp(clientIP, ip) == 0 && (expiration == 0 || expiration > now)) { // if the expiration is 0, then it's a permanent ban. If it's past now, the ban is still active
+                fclose(file);
+                return 1;
+            }
+        }
+    }
+
+    fclose(file);
+    return 0;
+}
+
+/**
  * Processes information about the accessing client to determine if the request to the server is legitimate.
  * 
  * This function will use access times as well as content analysis to determine if the accessor is a bot or scraper.
@@ -497,12 +547,18 @@ static int scanTraffic(char* clientIP, char* path) {
     pthread_mutex_unlock(&clientsMutex);
 
     if (rapid) {
-        return 2; //
+        return 2; // Suspicious activity
     }
 
+    if (isBlacklisted(clientIP)) {
+        return 1; // Blacklisted address
+    }
+
+    /*
     FILE *file;
     struct stat fileInfo;
     size_t bytesRead;
+
 
     if (stat("blacklist.csv", &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
         return -1;
@@ -512,6 +568,7 @@ static int scanTraffic(char* clientIP, char* path) {
     if (file == NULL) {
         return -1;
     }
+    */
     
     
     // Tried doing this 11/20, no success
@@ -543,7 +600,7 @@ static int scanTraffic(char* clientIP, char* path) {
     //     }
     // }
 
-    fclose(file);
+    //fclose(file);
     
     return 0; //allowed!
 }
