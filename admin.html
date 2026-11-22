@@ -57,6 +57,7 @@
         data = []
         blacklist = []
         specialEndpoints = []
+        detectionEndpoints = []
         max_rows = 25
 
         function searchActivity() {
@@ -133,6 +134,22 @@
             document.getElementById("endpointsTable").innerHTML = table;
         }
 
+        function searchDetected() {
+            table = `<tr>
+                <th>Endpoint</th>
+                <th>Index</th>
+            </tr>\n`;
+
+            count = 0;
+
+            for (d in detectionEndpoints) {
+                l = detectionEndpoints[d].split(",")
+                table = table + "<tr> <td> " + l[0] + "</td> <tr> <td> " + l[1] + "</td>  </tr>\n"
+            }
+
+            document.getElementById("endpointsTable").innerHTML = table;
+        }
+
         function refreshTraffic() {
             var json = new XMLHttpRequest();
             json.open("GET", base_url + "get_data");
@@ -197,6 +214,23 @@
                 searchBlacklist();
             }
         }
+
+        function refreshDetected() {
+            var json = new XMLHttpRequest();
+            json.open("GET", base_url + "get_detected_endpoints");
+            //json.setRequestHeader('Authorization', auth_key);
+            json.send();
+            
+            json.onreadystatechange = function(ddata) {
+                detectionEndpoints = json.responseText.split("\n");
+                detectionEndpoints.pop()
+                detectionEndpoints.reverse()
+                detectionEndpoints.pop()
+                //console.log(data);
+                //document.getElementById("searchterm").value = "";
+                searchDetected();
+            }
+        }
         
         window.onload = function() {
             refreshTraffic();
@@ -239,6 +273,18 @@
         <table id = "endpointsTable">
             <tr>
                 <th>IP Address</th>
+            </tr>
+        </table>
+    </div>
+    <div class="bordered">
+        <center><h2>AI Detected Endpoints</h2></center>
+        <button onclick="addDetectionEndpoint()">Add Detected Endpoint</button>
+        <label>Endpoint: </label><input type="text" id="endpointbox2">
+        <label>Payload index </label><input type="text" id="indexbox">
+        <table id="activityTable">
+            <tr>
+                <th>Endpoint</th>
+                <th>Index</th>
             </tr>
         </table>
     </div>

@@ -838,11 +838,6 @@ static int scanTraffic(const char *clientIP, const char *path, size_t *rapidCoun
         return 2;
     }
 
-    // If content scan path, check if content is ai generated.
-    if (strcmp(method, "POST") == 0) {
-
-    }
-
     
     return 0; //allowed!
 }
@@ -1004,10 +999,34 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
             buildResponse(fd, 400, 0, "text/plain", connection);
             return;
         }
-        printf("%s\n", arg);
         if (strlen(arg) != 0)
         {
             if (addSpecialEndpoint(arg) == 0) {
+                buildResponse(fd, 200, 0, "text/plain", "close");
+                return;
+            }
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    } else if (strcmp(path, "/reverse_proxy/get_detected_endpoints") == 0) { //Get data to populate admin webpage
+        if (returnFile(fd, connection, "contentEndpoints.csv") == 0) { //Placeholder
+            return;
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    } else if (strncmp(path, "/reverse_proxy/add_detected_endpoint", strlen("/reverse_proxy/add_special_endpoint")) == 0) { //Get data to populate admin webpage
+        char halfPath[1024];
+        char arg[1024];
+        char ind[1024];
+        if (sscanf(path, "%1023[^=]=%1023[^\r\n&]&%1023[^=]=%1023[^\r\n&]", halfPath, arg, halfPath, ind) != 4) {
+            buildResponse(fd, 400, 0, "text/plain", connection);
+            return;
+        }
+        if (strlen(arg) != 0)
+        {
+            if (addContentEndpoint(arg, ind) == 0) {
                 buildResponse(fd, 200, 0, "text/plain", "close");
                 return;
             }
@@ -1022,7 +1041,7 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     int violationCount = 0;
     int newViolation = 0;
 
-    verdict = scanTraffic(clientIP, path, method, request, &rapidCount, &violationCount, &newViolation);
+    verdict = scanTraffic(clientIP, path, &rapidCount, &violationCount, &newViolation);
 
     if (newViolation) {
         char reason[256];
