@@ -397,6 +397,53 @@ static long getContentLength(const char *request) {
 
     return length;
 }
+
+/**
+ * Finds the body of a HTTP request by looking after
+ * headers\r\n
+ * \r\n
+ * body
+ * Find the empty line and use the content length to see how many bytes are in the body. *body points to the request/.
+ * @param request the request we're looking at
+ * @param requestLength number of bytes in the request
+ * @param body pointer to the beginning of the body
+ * @param bodyLength size of the body in bytes
+ * @return 0 on success, -1 on any sort of error
+ */
+static int getPayload(const char *request, size_t requestLength, const char **body, size_t *bodyLength) {
+    const char *bodyStart;
+    long contentLength;
+
+    // HTTP headers have a blank line followed by \r\n\r\n so then strstr points to the beginning of the sequence
+    bodyStart = strstr(request, "\r\n\r\n");
+
+    // error check(no \r\n\r\n)
+    if (bodyStart == NULL) {
+        return -1;
+    }
+
+    bodyStart += 4; // move past \r\n\r\n
+
+    contentLength = getContentLength(request);
+
+    // if getContentLength is <0, something happened and we shouldn't continue
+    if (contentLength < 0) {
+        return -1;
+    }
+
+    // make sure that the complete body is in the request by checking bytes before the body + bytes in the body > thrn the request
+    if ((size_t)(bodyStart - request) + (size_t)contentLength > requestLength) {
+        return -1;
+    }
+
+
+    // "return" a pointer to the body to look at the body in place
+    *body = bodyStart;
+    *bodyLength = (size_t)contentLength;
+
+    return 0;
+}
+
 /**
  * Reads an HTTP request from a connected client socket.
  *
