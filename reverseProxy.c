@@ -67,6 +67,9 @@ static pthread_mutex_t logMutex = PTHREAD_MUTEX_INITIALIZER;
 // need to lock threads to prevent overriding for the different clients
 static pthread_mutex_t clientsMutex = PTHREAD_MUTEX_INITIALIZER;
 
+// need to lock threads to prevent overriding for adding clients to the blacklist
+static pthread_mutex_t blacklistMutex = PTHREAD_MUTEX_INITIALIZER;
+
 /*
  * Information passed from the main accept loop to a client thread.
  *
@@ -463,6 +466,38 @@ static int returnFile(int fd, const char *connection, char *path) {
 }
 
 /**
+ * Function to add a client to the blacklist
+ * @param clientIP IP address of the client to be banned
+ * @param reason The reason the client is banned
+ * @param expiration How long the client is banned
+ * @return 0 on success, 1 on error
+ */
+static int addToBlacklist(char *clientIP, char *reason, time_t expiration) {
+    pthread_mutex_lock(&blacklistMutex);
+
+    // "a" for append to write at the end of the file
+    FILE *file = fopen("blacklist.csv", "a");
+
+    if (file == NULL) {
+        pthread_mutex_unlock(&blacklistMutex);
+        perror("error opening blacklist.csv");
+        return 1;
+    }
+
+    // add a client with IP address, reason, expiration time(0 is permanent)
+    if (fprintf(file, "%s,%s,%ld\n", clientIP, reason, expiration) < 0) {
+        fclose(file);
+        pthread_mutex_unlock(&blacklistMutex);
+        return 1;
+    }
+
+    fclose(file);
+    pthread_mutex_unlock(&blacklistMutex);
+
+    return 0;
+}
+
+/**
  * Checks the blacklist file to see if a client is blacklisted
  * @param clientIP
  * @return 1 for blacklisted client, 0 otherwise
@@ -473,6 +508,7 @@ static int isBlacklisted(const char *clientIP) {
     char reason[256];
     long expiration;
 
+    // should be r instead of w+ because w+ erases the content first
     FILE *file = fopen("blacklist.csv", "r");
 
     if (file == NULL) {
