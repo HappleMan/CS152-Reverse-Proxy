@@ -291,3 +291,10 @@ timestamp,date,ip,method,path,flagged,reason
 1795325675,2026-11-21 21:34:35,127.0.0.1,GET,/reverse_proxy/add_special_endpoint?endpoint=/hello.world,0,none
 1795326185,2026-11-21 21:43:05,127.0.0.1,GET,/reverse_proxy/add_spial_endpoint?endpoint=hi,0,none
 1795326190,2026-11-21 21:43:10,127.0.0.1,GET,/reverse_proxy/add_spial_endpoint?endpoint=hi,0,none
+1795376255,2026-11-22 11:37:35,127.0.0.1,POST,/input,0,none
+1795376296,2026-11-22 11:38:16,127.0.0.1,POST,/input,0,none
+1795376312,2026-11-22 11:38:32,127.0.0.1,POST,/input,0,none
+1795376332,2026-11-22 11:38:52,127.0.0.1,POST,/input,0,none
+1795376390,2026-11-22 11:39:50,127.0.0.1,POST,/input,0,none
+1795376418,2026-11-22 11:40:18,127.0.0.1,POST,/input,0,none
+1795376470,2026-11-22 11:41:10,127.0.0.1,POST,/input,0,none

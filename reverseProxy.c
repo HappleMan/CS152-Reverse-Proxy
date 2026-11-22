@@ -71,9 +71,11 @@ static pthread_mutex_t clientsMutex = PTHREAD_MUTEX_INITIALIZER;
 // need to lock threads to prevent overriding for adding clients to the blacklist
 static pthread_mutex_t blacklistMutex = PTHREAD_MUTEX_INITIALIZER;
 
-// need to lock threads to prevent overriding for adding clients to the blacklist
+// need to lock threads to prevent overriding for adding special endpoints
 static pthread_mutex_t specialEndpointMutex = PTHREAD_MUTEX_INITIALIZER;
 
+// need to lock threads to prevent overriding for adding ai detection endpoints
+static pthread_mutex_t contentEndpointMutex = PTHREAD_MUTEX_INITIALIZER;
 
 
 /*
@@ -186,7 +188,8 @@ static int isSpecialEndpoint(const char *path) {
 }
 
 /**
- * 
+ * Adds an endpoint to the list of special endpoints, which identify bot behavior.
+ * @param endpoint The endpoint to add
  */
 static int addSpecialEndpoint(char *endpoint) {
     pthread_mutex_lock(&specialEndpointMutex);
@@ -209,6 +212,79 @@ static int addSpecialEndpoint(char *endpoint) {
 
     fclose(file);
     pthread_mutex_unlock(&specialEndpointMutex);
+
+    return 0;
+}
+
+/**
+ * Adds an endpoint to the list of endpoints whose content is scanned for AI-generation.
+ * @param endpoint The endpoint to add
+ * @param index The index in input that is scanned
+ */
+static int addContentEndpoint(char *endpoint, char *index) {
+    pthread_mutex_lock(&contentEndpointMutex);
+
+    // "a" for append to write at the end of the file
+    FILE *file = fopen("contentEndpoints.csv", "a");
+
+    if (file == NULL) {
+        pthread_mutex_unlock(&contentEndpointMutex);
+        perror("error opening contentEndpoints.csv");
+        return 1;
+    }
+
+    // add a client with IP address, reason, expiration time(0 is permanent)
+    if (fprintf(file, "%s,%s\n", endpoint, index) < 0) {
+        fclose(file);
+        pthread_mutex_unlock(&contentEndpointMutex);
+        return 1;
+    }
+
+    fclose(file);
+    pthread_mutex_unlock(&contentEndpointMutex);
+
+    return 0;
+}
+
+/**
+ * Looks at the path of the request to see if it contains a specified endpoint
+ * @param path path to look at and see if it contains any of the special endpoints
+ * @return 1 for contains a special endpoint and 0 for does not contain the special endpoint
+ */
+static int scanForAI(const char *path, const char *request) {
+    char line[512];
+
+    pthread_mutex_lock(&contentEndpointMutex);
+    FILE *file = fopen("contentEndpoints.csv", "r");
+
+    if (file == NULL) {
+        pthread_mutex_unlock(&contentEndpointMutex);
+        perror("error opening contentEndpoints.csv");
+        return 0;
+    }
+
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        char ln[256];
+        char content[256];
+        if (sscanf(line, "%255[^,],%255[^,]", ln,content) == 2) {
+            content[strlen(content) - 1] =  '\0';
+            
+            if (strcmp(path, ln) == 0)
+            { // if the line is equal to the path
+
+                //Scanning request for matching content index
+
+
+                            fclose(file);
+                            pthread_mutex_unlock(&contentEndpointMutex);
+                            return 1;
+            }
+        }
+    }
+
+    fclose(file);
+    pthread_mutex_unlock(&contentEndpointMutex);
 
     return 0;
 }
@@ -605,10 +681,11 @@ static int isBlacklisted(const char *clientIP) {
  */
 // static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
 
-static int scanTraffic(char* clientIP, char* path, size_t* rapidCountOut, int* violationCountOut, int* newViolationOut) {
+static int scanTraffic(char* clientIP, char* path, char* method, const char* request, size_t* rapidCountOut, int* violationCountOut, int* newViolationOut) {
     //int verdict = 0;
 
     //Check path
+    
 
     //Check ip
 
@@ -707,6 +784,11 @@ static int scanTraffic(char* clientIP, char* path, size_t* rapidCountOut, int* v
         return 2;
     }
 
+    // If content scan path, check if content is ai generated.
+    if (strcmp(method, "POST") == 0) {
+
+    }
+
     
     return 0; //allowed!
 }
@@ -722,6 +804,7 @@ static char* verdictReason(int verdict) {
         case 0: return "none";
         case 1: return "Blacklisted address";
         case 2: return "Suspicious activity";
+        case 3: return "AG-Generated content";
         default: return "Server error";
     }
 }
@@ -803,6 +886,8 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         return;
     }
     
+
+
     // https://man7.org/linux/man-pages/man3/realpath.3.html
     /*
     * Reject the request if:
@@ -864,11 +949,34 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
+    } else if (strcmp(path, "/reverse_proxy/get_ai_detection_endpoints") == 0) { //Get data to populate admin webpage
+        if (returnFile(fd, connection, "specialEndpoints.csv") == 0) { //Placeholder
+            return;
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    } else if (strstr(path, "/reverse_proxy/add_ai_detection_endpoint") != NULL) { //Get data to populate admin webpage
+        char halfPath[1024];
+        char arg[1024];
+        char ind[1024];
+        sscanf(path, "%1023[^=]=%1023[^&]%1023[^=]=%1023[^&]", halfPath, arg, halfPath, ind);
+        printf("%s\n", arg);
+        if (strlen(arg) != 0 && strlen(ind) != 0)
+        {
+            if (addContentEndpoint(arg, ind) == 0) {
+                buildResponse(fd, 200, 0, "text/plain", "close");
+                return;
+            }
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
     }
 
     // Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
     int violatioCount = 0;
-    if ((verdict = scanTraffic(clientIP, path, NULL, &violatioCount, NULL)) != 0)
+    if ((verdict = scanTraffic(clientIP, path, method, request, NULL, &violatioCount, NULL)) != 0)
     {
         char reason[MAX_BODY];
         sprintf(reason, "Violation #%d: %s", violatioCount, verdictReason(verdict));
@@ -876,6 +984,8 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
         return;
     }
+
+
 
     //Traffic validated, make forwarded request and buffer back
     if (strcmp(path, "/favicon.ico") != 0) //Browser just requests this repeatedly, best not to log
@@ -926,6 +1036,7 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     }
     */
     // I'm pretty sure you just need to do this
+    printf("%s\n", request);
     if (sendall(fwsock, request, requestLength) < 0) {
         close(fwsock);
         buildResponse(fd, 502, 0, "text/plain", "close");
@@ -937,8 +1048,8 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     
     while ((n = read(fwsock, buf, BUFFERSIZE)) > 0) {
         if (sendall(fd, buf, n) < 0)
-        
-        break;
+
+            break;
     }
     
     //Must send after for exact content size.
