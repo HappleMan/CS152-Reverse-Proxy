@@ -1035,7 +1035,7 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     int violationCount = 0;
     int newViolation = 0;
 
-    verdict = scanTraffic(clientIP, path, &rapidCount, &violationCount, &newViolation);
+    verdict = scanTraffic(clientIP, path, method, request, &rapidCount, &violationCount, &newViolation);
 
     if (newViolation) {
         char reason[256];
