@@ -71,6 +71,11 @@ static pthread_mutex_t clientsMutex = PTHREAD_MUTEX_INITIALIZER;
 // need to lock threads to prevent overriding for adding clients to the blacklist
 static pthread_mutex_t blacklistMutex = PTHREAD_MUTEX_INITIALIZER;
 
+// need to lock threads to prevent overriding for adding clients to the blacklist
+static pthread_mutex_t specialEndpointMutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+
 /*
  * Information passed from the main accept loop to a client thread.
  *
@@ -142,25 +147,68 @@ static struct client_info *getClient(const char *ip) {
 
     return &clients[unused]; // return the new client
 }
-
+ 
 /**
  * Looks at the path of the request to see if it contains a specified endpoint
  * @param path path to look at and see if it contains any of the special endpoints
  * @return 1 for contains a special endpoint and 0 for does not contain the special endpoint
  */
 static int isSpecialEndpoint(const char *path) {
-    const char *specialEndpoints[] = {"/robots.txt", "/llms.txt", "/sitemap.xml"};
+    char line[512];
 
-    // only compare up to '?' so that the comparison doesn't include queries
-    size_t pathLength = strcspn(path, "?");
-    size_t endpointCount = sizeof(specialEndpoints) / sizeof(specialEndpoints[0]);
+    pthread_mutex_lock(&specialEndpointMutex);
+    FILE *file = fopen("specialEndpoints.csv", "r");
 
-    // go through the list of special endpoints to see if the path contains any of them
-    for (size_t i = 0; i < endpointCount; i++) {
-        if (strlen(specialEndpoints[i]) == pathLength && strncmp(path,specialEndpoints[i], pathLength) == 0) {
-            return 1;
+    if (file == NULL) {
+        pthread_mutex_unlock(&specialEndpointMutex);
+        return 0;
+    }
+
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        char ln[256];
+        if (sscanf(line, "%255[^,]", ln) == 1) {
+            ln[strlen(ln) - 1] =  '\0';
+            
+            if (strcmp(path, ln) == 0)
+            { // if the line is equal to the path
+                fclose(file);
+                pthread_mutex_unlock(&specialEndpointMutex);
+                return 1;
+            }
         }
     }
+
+    fclose(file);
+    pthread_mutex_unlock(&specialEndpointMutex);
+
+    return 0;
+}
+
+/**
+ * 
+ */
+static int addSpecialEndpoint(char *endpoint) {
+    pthread_mutex_lock(&specialEndpointMutex);
+
+    // "a" for append to write at the end of the file
+    FILE *file = fopen("specialEndpoints.csv", "a");
+
+    if (file == NULL) {
+        pthread_mutex_unlock(&specialEndpointMutex);
+        perror("error opening specialEndpoints.csv");
+        return 1;
+    }
+
+    // add a client with IP address, reason, expiration time(0 is permanent)
+    if (fprintf(file, "%s\n", endpoint) < 0) {
+        fclose(file);
+        pthread_mutex_unlock(&specialEndpointMutex);
+        return 1;
+    }
+
+    fclose(file);
+    pthread_mutex_unlock(&specialEndpointMutex);
 
     return 0;
 }
@@ -180,30 +228,30 @@ static size_t countRapidAccess(const struct client_info *client, time_t now, int
     for (size_t i = 0; i < client->history_size; i++) {
         time_t age = now - client->history[i].timestamp;
         // if the age is within the access window and is one of the special endpoints, then add 1 to the number of special accesses
-        if (age >= 0 && age <= ACCESS_WINDOW && isSpecialEndpoint(client->history[i].path)) {
+        if (age >= 0 && age <= ACCESS_WINDOW && isSpecialEndpoint(client->history[i].path))
+        {
             latestSpecialIndex = i;
         }
     }
-
+    
     // if you go through the history and the latestSpecialIndex doesn't change or it's the latest entry, then there wasn't rapid access
     if (latestSpecialIndex == MAX_HISTORY) {
         return 0;
     }
-
+    
     *specialSequence = client->history[latestSpecialIndex].sequence;
-
+    
     size_t pageCount = 0; // keeps track of how many pages were accessed after the special endpoint
-
+    
     // start at the entry after the special endpoint to look at rapid access
     for (size_t i = latestSpecialIndex + 1; i < client->history_size; i++) {
         time_t age = now - client->history[i].timestamp;
-
         // if the entry has an age within the window then increment the count
         if (age >= 0 && age <= ACCESS_WINDOW && !isSpecialEndpoint(client->history[i].path)) {
             pageCount++;
         }
     }
-
+    
     return pageCount;
 }
 
@@ -452,7 +500,6 @@ static int returnFile(int fd, const char *connection, char *path) {
     struct stat fileInfo;
     char buf[BUFFERSIZE];
     size_t bytesRead;
-
     if (stat(path, &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
         return 1;
     }
@@ -659,57 +706,16 @@ static int scanTraffic(char* clientIP, char* path, size_t* rapidCountOut, int* v
 
         return 2;
     }
+
     
     return 0; //allowed!
 }
 
-/*
-    FILE *file;
-    struct stat fileInfo;
-    size_t bytesRead;
-
-
-    if (stat("blacklist.csv", &fileInfo) < 0 || !S_ISREG(fileInfo.st_mode)) {
-        return -1;
-    }
-
-    file = fopen("blacklist.csv", "w+");
-    if (file == NULL) {
-        return -1;
-    }
-    */
-
-
-// Tried doing this 11/20, no success
-// int buf;
-// char line[512] = "";
-// int index = 0;
-// while ((int)(buf = fgetc(file)) != -100)
-// {
-//     if (buf != '\n') {
-//         line[index] = buf;
-//         index++;
-//         printf("%d\n", buf);
-//         break;
-//     }
-//     else
-//     {
-//         char ip[INET6_ADDRSTRLEN];
-//         char reason[MAX_BODY];
-//         time_t exp;
-//         sscanf(line, "%s,%s,%ld", ip, reason, &exp);
-//         if (strcmp(clientIP, ip) == 0)
-//         {
-//             time_t now = time(NULL);
-//             if (exp == 0 || exp > now) {
-//                 return 1;
-//             }
-//         }
-//         memset(line, 0, sizeof(line)); //reset
-//     }
-// }
-
-//fclose(file);
+/**
+ * Returns a string verdict from integer
+ * @param verdict integer verdict
+ * @return A message
+ */
 
 static char* verdictReason(int verdict) {
     switch(verdict) {
@@ -784,37 +790,39 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     struct stat fileInfo;
     //char canonPath[PATH_MAX];
     int verdict;
-
     // Parse the method, URL path, and HTTP version from the request line.
     int fields = sscanf(request, "%15s %1023s %15s", method, path, version);
     if (fields != 3) {
         buildResponse(fd, 400, 0, "text/plain", "close");
         return;
     }
-
+    
     if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0 && strcmp(method, "POST") != 0 && strcmp(method, "PUT") != 0 &&
-        strcmp(method, "PATCH") != 0 && strcmp(method, "DELETE") != 0 && strcmp(method, "OPTIONS") != 0) {
+    strcmp(method, "PATCH") != 0 && strcmp(method, "DELETE") != 0 && strcmp(method, "OPTIONS") != 0) {
         buildResponse(fd, 405, 0, "text/plain", "close");
         return;
     }
-
+    
     // https://man7.org/linux/man-pages/man3/realpath.3.html
     /*
-     * Reject the request if:
-     * The URL is not an absolute path.
-     * It exceeds fullPath.
-     */
-    if (path[0] != '/' || snprintf(fullPath, sizeof(fullPath),
-        "%s%s", webroot, path) >= sizeof(fullPath)) {
-        buildResponse(fd, 404, 0, "text/plain", connection);
-        return;
+    * Reject the request if:
+    * The URL is not an absolute path.
+    * It exceeds fullPath.
+    */
+   
+   if (path[0] != '/' || snprintf(fullPath, sizeof(fullPath),
+   "%s%s", webroot, path) >= sizeof(fullPath)) {
+       buildResponse(fd, 404, 0, "text/plain", connection);
+       return;
     }
-
+    
     //Determine if requesting the admin panel. I was gonna use a switch case but C switch and strings are not friends.
     if (strcmp(path, "/reverse_proxy/admin") == 0) { // TODO: Maybe add authentication
-        //char adminPath[PATH_MAX];
+        //char adminPath[PATH_MAX];g
         //snprintf(adminPath, sizeof(adminPath), "%s/admin.html", webroot);
-        if (returnFile(fd, connection, "admin.html") == 0) { //This is correct because it's on the side of the reverse proxy, not the end server.
+        
+        if (returnFile(fd, connection, "admin.html") == 0)
+        { // This is correct because it's on the side of the reverse proxy, not the end server.
             return;
         }
 
@@ -827,22 +835,48 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
         buildResponse(fd, 500, 0, "text/plain", "close");
         return;
-    }// TODO: accept payloads for admin panel requests
+    } else if (strcmp(path, "/reverse_proxy/get_blacklist") == 0) { //Get data to populate admin webpage
+        if (returnFile(fd, connection, "blacklist.csv") == 0) { //Placeholder
+            return;
+        }
 
-    size_t rapidCount;
-    int violationCount;
-    int newViolation;
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    } else if (strcmp(path, "/reverse_proxy/get_special_endpoints") == 0) { //Get data to populate admin webpage
+        if (returnFile(fd, connection, "specialEndpoints.csv") == 0) { //Placeholder
+            return;
+        }
 
-    //Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
-    verdict = scanTraffic(clientIP, path, &rapidCount, &violationCount, &newViolation);
-    if (newViolation) {
-        logEvent(clientIP, method, path, 2, "rapid access violation");
-    }
-    if (verdict == 1 || verdict == 2) {
-        buildResponse(fd, 403, 0, "text/plain", connection);
+        buildResponse(fd, 500, 0, "text/plain", "close");
+        return;
+    } else if (strstr(path, "/reverse_proxy/add_special_endpoint") != NULL) { //Get data to populate admin webpage
+        char halfPath[1024];
+        char arg[1024];
+        sscanf(path, "%1023[^=]=%s[^\n]", halfPath, arg);
+        printf("%s\n", arg);
+        if (strlen(arg) != 0)
+        {
+            if (addSpecialEndpoint(arg) == 0) {
+                buildResponse(fd, 200, 0, "text/plain", "close");
+                return;
+            }
+        }
+
+        buildResponse(fd, 500, 0, "text/plain", "close");
         return;
     }
-    
+
+    // Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
+    int violatioCount = 0;
+    if ((verdict = scanTraffic(clientIP, path, NULL, &violatioCount, NULL)) != 0)
+    {
+        char reason[MAX_BODY];
+        sprintf(reason, "Violation #%d: %s", violatioCount, verdictReason(verdict));
+        logEvent(clientIP, method, path, verdict, reason);
+        buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
+        return;
+    }
+
     //Traffic validated, make forwarded request and buffer back
     if (strcmp(path, "/favicon.ico") != 0) //Browser just requests this repeatedly, best not to log
         logEvent(clientIP, method, path, 0, "none");

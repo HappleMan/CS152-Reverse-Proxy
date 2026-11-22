@@ -10,7 +10,21 @@
         }
         
         .bordered {
-            width: 95 vw;
+            width: 95vw;
+            min-height: 50px;
+            border-radius: 5;
+            border-color: lightgray;
+            border-style: double;
+            border-width: 1px;
+            padding: 0 10px;
+            margin-bottom: 15px;
+            margin-left: .5vw;
+        }
+
+
+        .bordered_half {
+            display: inline-block;
+            width: 45.69vw;
             min-height: 50px;
             padding: 0;
             border-radius: 5;
@@ -19,15 +33,17 @@
             border-width: 1px;
             padding: 0 10px;
             margin-bottom: 15px;
+            margin-left: .5vw;
         }
 
         table {
             border-collapse: collapse;
-            width: 100%;
+            
         }
 
         td,th {
             border: 1px solid;
+            min-width: 120px;;
         }
 
         .flagged td {
@@ -39,9 +55,11 @@
         
         //timestamp    date,ip,method,path,flagged,reason
         data = []
+        blacklist = []
+        specialEndpoints = []
         max_rows = 25
 
-        function search() {
+        function searchActivity() {
             table = `<tr>
                 <th>Date</th>
                 <th>IP Address</th>
@@ -59,10 +77,14 @@
                 //console.log(l)
                 flagged = ""
 
-                if (((l[5] == "1" && document.getElementById("filterflagged")) || !document.getElementById("filterflagged").checked) && data[d].includes(document.getElementById("searchbox").value)){
-                    if (l[5] == "1") {
+                if (((l[5] != "0" && document.getElementById("filterflagged")) || !document.getElementById("filterflagged").checked) && data[d].includes(document.getElementById("searchbox").value)){ 
+                    if (l[5] != "0") {
                         flagged = " class='flagged'"
-                        l[5] = "Flagged"
+                        if (l[5] == "2") {
+                            l[5] = "Violation"
+                        } else {
+                        l[5] = "Blocked"
+                        }
                     } else {
                         l[5] = ""
                     }
@@ -83,6 +105,34 @@
             document.getElementById("activityTable").innerHTML = table;
         }
 
+        function searchEndpoints() {
+            table = `<tr>
+                <th>Path</th>
+            </tr>\n`;
+
+            count = 0;
+
+            for (d in specialEndpoints) {
+                table = table + "<tr> <td> " + specialEndpoints[d] + "</td> </tr>\n"
+            }
+
+            document.getElementById("endpointsTable").innerHTML = table;
+        }
+
+        function searchBlacklist() {
+            table = `<tr>
+                <th>IP Address</th>
+            </tr>\n`;
+
+            count = 0;
+
+            for (d in blacklist) {
+                table = table + "<tr> <td> " + blacklist[d] + "</td> </tr>\n"
+            }
+
+            document.getElementById("endpointsTable").innerHTML = table;
+        }
+
         function refreshTraffic() {
             var json = new XMLHttpRequest();
             json.open("GET", base_url + "get_data");
@@ -96,11 +146,61 @@
                 data.pop()
                 //console.log(data);
                 //document.getElementById("searchterm").value = "";
-                search();
+                searchActivity();
+            }
+        }
+
+        function refreshEndpoints() {
+            var json = new XMLHttpRequest();
+            json.open("GET", base_url + "get_special_endpoints");
+            //json.setRequestHeader('Authorization', auth_key);
+            json.send();
+            
+            json.onreadystatechange = function(ddata) {
+                specialEndpoints = json.responseText.split("\n");
+                specialEndpoints.pop()
+                specialEndpoints.reverse()
+                specialEndpoints.pop()
+                //console.log(data);
+                //document.getElementById("searchterm").value = "";
+                searchEndpoints();
+            }
+        }
+
+        function addEndpoint() {
+            if (document.getElementById("endpointbox").value.length > 1) {
+                var json = new XMLHttpRequest();
+                json.open("GET", base_url + "add_special_endpoint?endpoint=" + document.getElementById("endpointbox").value);
+                //json.setRequestHeader('Authorization', auth_key);
+                json.send();
+                document.getElementById("endpointbox").value = "";
+                
+                json.onreadystatechange = function(ddata) {
+                    refreshEndpoints();
+                }
+            }
+        }
+
+        function refreshBlacklist() {
+            var json = new XMLHttpRequest();
+            json.open("GET", base_url + "get_blacklist");
+            //json.setRequestHeader('Authorization', auth_key);
+            json.send();
+            
+            json.onreadystatechange = function(ddata) {
+                blacklist = json.responseText.split("\n");
+                blacklist.pop()
+                blacklist.reverse()
+                blacklist.pop()
+                //console.log(data);
+                //document.getElementById("searchterm").value = "";
+                searchBlacklist();
             }
         }
         
         window.onload = function() {
+            refreshTraffic();
+            refreshEndpoints();
             refreshTraffic();
         }
     </script>
@@ -109,7 +209,7 @@
     <center><h1>Reverse Proxy Administration</h1></center>
     <div class="bordered">
         <center><h2>Recent Activity</h2></center>
-        <button onclick="search()">Search</button>
+        <button onclick="searchActivity()">Search</button>
         <label>Filter: </label><input type="text" id="searchbox">
         <label>Only Show Flagged: </label><input type="checkbox" id="filterflagged">
         <table id="activityTable">
@@ -124,10 +224,23 @@
             
         </table>
     </div>
-    <div class="bordered">
+    <div class="bordered_half">
         <center><h2>Flagged Endpoints</h2></center>
-        TODO: Show endpoints which are flagged such as robots.txt, llms.txt, ..
-        <br> Allow user to add or delete entry
+        <label>New Endpoint: </label><input type="text" id="endpointbox">
+        <button onclick="addEndpoint()">Add Endpoint:</button>
+        <table id = "endpointsTable">
+            <tr>
+                <th>Path</th>
+            </tr>
+        </table>
+    </div>
+    <div class="bordered_half">
+        <center><h2>Blacklisted Addresses</h2></center>
+        <table id = "endpointsTable">
+            <tr>
+                <th>IP Address</th>
+            </tr>
+        </table>
     </div>
 </body>
 </html>
