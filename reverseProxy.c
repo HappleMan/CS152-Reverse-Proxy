@@ -45,6 +45,7 @@ go back to blocking on accept
 #define MAX_HISTORY 1024
 #define ACCESS_WINDOW 10 // 10 seconds for now for testing. will change later to probably 1 hour
 #define MAX_ACCESS_THRESHOLD 10 // just say that 10 accesses in 10 seconds is reportable, can change later
+#define MAX_VIOLATIONS 10 // 10 counts of rapid acesses gets you banned
 
 // Default directory containing files served by the origin server.
 #define ROOT "./www"
@@ -86,6 +87,7 @@ struct connection_args { // instead of the dict
 struct get_event {
     time_t timestamp;
     char path[1024]; // only the path so we don't have to worry about any memory from pointing to the request
+    int sequence; // keep track of the sequence so that the counter doesn't try to count previous counts
 };
 
 struct client_info { // per client, has the client's IP address, the event history, and how many counts of access
@@ -93,6 +95,10 @@ struct client_info { // per client, has the client's IP address, the event histo
     char ip[INET6_ADDRSTRLEN];
     struct get_event history[MAX_HISTORY]; // client's requests
     size_t history_size;
+
+    int violations;
+    int last_special;
+    int next_sequence;
 };
 
 static struct client_info clients[MAX_CLIENTS]; // list of clients
@@ -160,13 +166,16 @@ static int isSpecialEndpoint(const char *path) {
 }
 
 /**
- * Detects access to a special endpoint and then rapid access to other pages
+ * Counts access to a special endpoint and then rapid access to other pages
  * @param client specific client we're looking at
  * @param now time to compare the timestamp to for the access window
+ * @param specialSequence the sequence that triggers the rapid access
  * @return false for is there's no special endpoint entries or if the pageCount after the access is less than the threshold. Return true for if the number of pages that are accessed within the window meets the threshold.
  */
-static bool detectRapidIndexing(const struct client_info *client, time_t now) {
+static size_t countRapidAccess(const struct client_info *client, time_t now, int *specialSequence) {
     size_t latestSpecialIndex = MAX_HISTORY; // get the latest special endpoint access so then we can see rapid access to pages after
+
+    *specialSequence = 0;
     // go through the client's history to get the age of each entry to see if it's inside the access window and if it is, see if it's an access to a special endpoint
     for (size_t i = 0; i < client->history_size; i++) {
         time_t age = now - client->history[i].timestamp;
@@ -178,8 +187,10 @@ static bool detectRapidIndexing(const struct client_info *client, time_t now) {
 
     // if you go through the history and the latestSpecialIndex doesn't change or it's the latest entry, then there wasn't rapid access
     if (latestSpecialIndex == MAX_HISTORY) {
-        return false;
+        return 0;
     }
+
+    *specialSequence = client->history[latestSpecialIndex].sequence;
 
     size_t pageCount = 0; // keeps track of how many pages were accessed after the special endpoint
 
@@ -193,7 +204,7 @@ static bool detectRapidIndexing(const struct client_info *client, time_t now) {
         }
     }
 
-    return pageCount >= MAX_ACCESS_THRESHOLD;
+    return pageCount;
 }
 
 // mimic the sendall function
@@ -508,10 +519,12 @@ static int isBlacklisted(const char *clientIP) {
     char reason[256];
     long expiration;
 
+    pthread_mutex_lock(&blacklistMutex);
     // should be r instead of w+ because w+ erases the content first
     FILE *file = fopen("blacklist.csv", "r");
 
     if (file == NULL) {
+        pthread_mutex_unlock(&blacklistMutex);
         return 0;
     }
 
@@ -522,12 +535,14 @@ static int isBlacklisted(const char *clientIP) {
         if (sscanf(line, "%45[^,],%255[^,],%ld", ip, reason, &expiration) == 3) {
             if (strcmp(clientIP, ip) == 0 && (expiration == 0 || expiration > now)) { // if the expiration is 0, then it's a permanent ban. If it's past now, the ban is still active
                 fclose(file);
+                pthread_mutex_unlock(&blacklistMutex);
                 return 1;
             }
         }
     }
 
     fclose(file);
+    pthread_mutex_unlock(&blacklistMutex);
     return 0;
 }
 
@@ -543,7 +558,7 @@ static int isBlacklisted(const char *clientIP) {
  */
 // static void scanTraffic(int fd, const char *request, const char *connection, char *path) {
 
-static int scanTraffic(char* clientIP, char* path) {
+static int scanTraffic(char* clientIP, char* path, size_t* rapidCountOut, int* violationCountOut, int* newViolationOut) {
     //int verdict = 0;
 
     //Check path
@@ -552,7 +567,35 @@ static int scanTraffic(char* clientIP, char* path) {
 
     time_t now = time(NULL);
     struct client_info *client;
-    bool rapid;
+    int specialSequence = 0;
+    size_t rapidCount;
+    int violationCount;
+    int newViolation = 0;
+    int shouldBlacklist = 0;
+    int blacklistResult;
+
+    if (rapidCountOut != NULL) {
+        *rapidCountOut = 0;
+    }
+
+    if (violationCountOut != NULL) {
+        *violationCountOut = 0;
+    }
+
+    if (newViolationOut != NULL) {
+        *newViolationOut = 0;
+    }
+
+    blacklistResult = isBlacklisted(clientIP);
+
+    // moved up here so that it doesn't do unnecessary work if the client is blacklisted
+    if (blacklistResult == 1) {
+        return 1;
+    }
+
+    if (blacklistResult < 0) {
+        return -1;
+    }
 
     pthread_mutex_lock(&clientsMutex);
 
@@ -576,21 +619,51 @@ static int scanTraffic(char* clientIP, char* path) {
 
     client->history[client->history_size].path[sizeof(client->history[client->history_size].path) - 1] = '\0';
 
+    client->history[client->history_size].sequence = ++client->next_sequence;
+
     client->history_size++;
 
-    rapid = detectRapidIndexing(client, now);
+    rapidCount = countRapidAccess(client, now, &specialSequence);
+
+    if (rapidCount >= MAX_ACCESS_THRESHOLD && specialSequence != 0 && specialSequence != client->last_special) {
+        client->violations++;
+        client->last_special = specialSequence;
+        newViolation = 1;
+    }
+
+    violationCount = client->violations;
+
+    if (newViolation &&
+        violationCount >= MAX_VIOLATIONS) {
+        shouldBlacklist = 1;
+        }
+
+    if (rapidCountOut != NULL) {
+        *rapidCountOut = rapidCount;
+    }
+
+    if (violationCountOut != NULL) {
+        *violationCountOut = violationCount;
+    }
+
+    if (newViolationOut != NULL) {
+        *newViolationOut = newViolation;
+    }
 
     pthread_mutex_unlock(&clientsMutex);
 
-    if (rapid) {
-        return 2; // Suspicious activity
-    }
+    if (shouldBlacklist) {
+        if (addToBlacklist(clientIP, "10 rapid-access violations", 0) != 0) {
+            return -1;
+        }
 
-    if (isBlacklisted(clientIP)) {
-        return 1; // Blacklisted address
+        return 2;
     }
+    
+    return 0; //allowed!
+}
 
-    /*
+/*
     FILE *file;
     struct stat fileInfo;
     size_t bytesRead;
@@ -605,41 +678,38 @@ static int scanTraffic(char* clientIP, char* path) {
         return -1;
     }
     */
-    
-    
-    // Tried doing this 11/20, no success
-    // int buf;
-    // char line[512] = "";
-    // int index = 0;
-    // while ((int)(buf = fgetc(file)) != -100)
-    // {
-    //     if (buf != '\n') {
-    //         line[index] = buf;
-    //         index++;
-    //         printf("%d\n", buf);
-    //         break;
-    //     }
-    //     else
-    //     {
-    //         char ip[INET6_ADDRSTRLEN];
-    //         char reason[MAX_BODY];
-    //         time_t exp;
-    //         sscanf(line, "%s,%s,%ld", ip, reason, &exp);
-    //         if (strcmp(clientIP, ip) == 0)
-    //         {
-    //             time_t now = time(NULL);
-    //             if (exp == 0 || exp > now) {
-    //                 return 1;
-    //             }
-    //         }
-    //         memset(line, 0, sizeof(line)); //reset
-    //     }
-    // }
 
-    //fclose(file);
-    
-    return 0; //allowed!
-}
+
+// Tried doing this 11/20, no success
+// int buf;
+// char line[512] = "";
+// int index = 0;
+// while ((int)(buf = fgetc(file)) != -100)
+// {
+//     if (buf != '\n') {
+//         line[index] = buf;
+//         index++;
+//         printf("%d\n", buf);
+//         break;
+//     }
+//     else
+//     {
+//         char ip[INET6_ADDRSTRLEN];
+//         char reason[MAX_BODY];
+//         time_t exp;
+//         sscanf(line, "%s,%s,%ld", ip, reason, &exp);
+//         if (strcmp(clientIP, ip) == 0)
+//         {
+//             time_t now = time(NULL);
+//             if (exp == 0 || exp > now) {
+//                 return 1;
+//             }
+//         }
+//         memset(line, 0, sizeof(line)); //reset
+//     }
+// }
+
+//fclose(file);
 
 static char* verdictReason(int verdict) {
     switch(verdict) {
@@ -759,10 +829,17 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         return;
     }// TODO: accept payloads for admin panel requests
 
+    size_t rapidCount;
+    int violationCount;
+    int newViolation;
+
     //Verdict of 0 = passed analysis, allowed access. Verdict otherwise determines reason for denied request.
-    if ((verdict = scanTraffic(clientIP, path)) != 0) {
-        logEvent(clientIP, method, path, verdict, verdictReason(verdict));
-        buildResponse(fd, 403, 0, "text/plain", connection); // TODO: Replace forbidden response with custom response page
+    verdict = scanTraffic(clientIP, path, &rapidCount, &violationCount, &newViolation);
+    if (newViolation) {
+        logEvent(clientIP, method, path, 2, "rapid access violation");
+    }
+    if (verdict == 1 || verdict == 2) {
+        buildResponse(fd, 403, 0, "text/plain", connection);
         return;
     }
     
