@@ -35,7 +35,7 @@ go back to blocking on accept
 #include <time.h>
 #include <stdbool.h>
 #include <curl/curl.h>
-#include <cjson/cJSON.h>
+#include <json-c/json.h>
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
@@ -914,6 +914,31 @@ static int logEvent(const char *ip, const char *method, const char *path, const 
  */
 static int isText(const char *request) {
     return strcasestr(request, "Content-Type: text/") != NULL || strcasestr(request, "Content-Type: application/json") != NULL;
+}
+
+struct api_response {
+    char *data;
+    size_t size;
+};
+
+static size_t writeApiResponse(void *contents, size_t size, size_t count, void *userData) {
+    size_t received = size * count;
+    struct api_response *response = userData;
+
+    char *newData = realloc(response->data, response->size + received + 1);
+
+    if (newData == NULL) {
+        return 0;
+    }
+
+    response->data = newData;
+
+    memcpy(response->data + response->size, contents, received);
+
+    response->size += received;
+    response->data[response->size] = '\0';
+
+    return received;
 }
 
 /**
