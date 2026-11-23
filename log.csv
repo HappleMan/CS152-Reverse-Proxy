@@ -444,3 +444,5 @@ timestamp,date,ip,method,path,flagged,reason
 1795370571,2026-11-22 10:02:51,127.0.0.1,GET,/page8.html,1,Blacklisted address
 1795370571,2026-11-22 10:02:51,127.0.0.1,GET,/page9.html,1,Blacklisted address
 1795370571,2026-11-22 10:02:51,127.0.0.1,GET,/page10.html,1,Blacklisted address
+1795395427,2026-11-22 16:57:07,127.0.0.1,POST,/test,1,Blacklisted address
+1795395471,2026-11-22 16:57:51,127.0.0.1,POST,/test,1,Blacklisted address

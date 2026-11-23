@@ -33,7 +33,8 @@ go back to blocking on accept
 #include <ctype.h>
 #include <limits.h>
 #include <time.h>
-#include <stdbool.h>
+#include <curl/curl.h>
+#include <json-c/json.h>
 
 // The address and port where the origin server listens. The reverse proxy will forward requests to this server.
 #define HOST "127.0.0.1"
@@ -353,7 +354,7 @@ static size_t countRapidAccess(const struct client_info *client, time_t now, int
  */
 static int sendall(int fd, const void *data, size_t len) {
     const char *bytes = (const char *)data;
-    ssize_t sent = 0;
+    size_t sent = 0;
     // https://man7.org/linux/man-pages/man2/send.2.html
     while (sent < len) {
         ssize_t n = send(fd, bytes + sent, len - sent, 0);
@@ -435,7 +436,7 @@ static int buildResponse(int fd, int status, size_t contentLength, const char *c
         "Content-Type: %s\r\n"
         "Connection: %s\r\n"
         "\r\n", status, statusCode(status), contentLength, contentType, connection);
-    if (len < 0 || len >= sizeof(buf)) {
+    if (len < 0 || (size_t)len >= sizeof(buf)) {
         return -1;
     }
     return sendall(fd, buf, (size_t)len);
@@ -838,10 +839,12 @@ static int scanTraffic(const char *clientIP, const char *path, size_t *rapidCoun
         return 2;
     }
 
+    /**
     // If content scan path, check if content is ai generated.
     if (strcmp(method, "POST") == 0) {
 
     }
+    */
 
     
     return 0; //allowed!
@@ -914,7 +917,270 @@ static int isText(const char *request) {
     return strcasestr(request, "Content-Type: text/") != NULL || strcasestr(request, "Content-Type: application/json") != NULL;
 }
 
+struct api_response {
+    char *data;
+    size_t size;
+};
 
+static size_t writeApiResponse(void *contents, size_t size, size_t count, void *userData) {
+    size_t received = size * count;
+    struct api_response *response = userData;
+
+    char *newData = realloc(response->data, response->size + received + 1);
+
+    if (newData == NULL) {
+        return 0;
+    }
+
+    response->data = newData;
+
+    memcpy(response->data + response->size, contents, received);
+
+    response->size += received;
+    response->data[response->size] = '\0';
+
+    return received;
+}
+
+/**
+ * Sends text to Pangram's AI-detection API and waits for the result.
+ * Submit text with POST /task.
+ * Receive a task_id.
+ * Poll GET /task/<task_id>.
+ * top when the task succeeds or fails.
+ *
+ * Pangram REST API documentation:
+ * https://docs.pangram.com/quickstart-rest
+ *
+ * @param text Text sent to Pangram.
+ * @param textLength Bytes in text.
+ * @param result Buffer where the result is stored.
+ * @param resultSize  Capacity of the result buffer.
+ *
+ * @return 0 on success, or -1 if an error occurs.
+ */
+static int checkTextWithPangram(const char *text, size_t textLength, char *result, size_t resultSize) {
+    const char *apiKey;
+    char apiHeader[512]; // HTTP authentication header
+    char taskUrl[512]; // URL used when polling for the result
+    char taskId[256]; // task identifier returned by Pangram
+
+    // https://curl.se/libcurl/c/libcurl-tutorial.html
+    CURL *curl; // libcurl request
+    CURLcode curlResult; // result returned by curl_easy_perform()
+
+    // stores headers
+    struct curl_slist *headers = NULL;
+
+    // stores the response returned by Pangram
+    struct api_response response = {
+        .data = NULL,
+        .size = 0
+    };
+
+    struct json_object *requestJson = NULL;
+    struct json_object *responseJson = NULL;
+    struct json_object *taskIdJson = NULL;
+    struct json_object *stageJson = NULL;
+    struct json_object *headlineJson = NULL;
+
+    if (text == NULL || result == NULL || resultSize == 0 || textLength == 0) {
+        return -1;
+    }
+
+    // shouldn't have the key in the code
+    apiKey = getenv("PANGRAM_API_KEY");
+
+    if (apiKey == NULL || apiKey[0] == '\0') {
+        fprintf(stderr, "PANGRAM_API_KEY is not set\n");
+        return -1;
+    }
+
+    // create a libcurl easy handle
+    curl = curl_easy_init(); // curl_easy_init() allocates and initializes a handle used to configure and perform one HTTP request.
+
+    if (curl == NULL) {
+        return -1;
+    }
+
+    // create a JSON object
+    requestJson = json_object_new_object();
+
+    if (requestJson == NULL) {
+        curl_easy_cleanup(curl);
+        return -1;
+    }
+
+    // add text to the JSON object
+    json_object_object_add(requestJson, "text", json_object_new_string_len(text, textLength));
+
+    // select Pangram model
+    json_object_object_add(requestJson, "model", json_object_new_string("pangram-4"));
+
+    // convert json-c object into a null-terminated JSON string
+    const char *jsonBody = json_object_to_json_string(requestJson);
+
+    // create API-key header
+    snprintf(apiHeader, sizeof(apiHeader), "x-api-key: %s", apiKey);
+
+     // sdd HTTP headers to the libcurl header list
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    headers = curl_slist_append(headers, apiHeader);
+
+    if (headers == NULL) {
+        curl_easy_cleanup(curl);
+        json_object_put(requestJson);
+        return -1;
+    }
+
+     // tells libcurl where to send the request
+    curl_easy_setopt(curl, CURLOPT_URL, "https://text.external-api.pangram.com/task");
+
+    // tells libcurl to send an HTTP POST request.
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+
+    // pass the JSON request body to libcurl
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonBody);
+
+     // attach the content type and x-api-key headers.
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    // https://curl.se/libcurl/c/CURLOPT_WRITEFUNCTION.html
+
+    // have libcurl send the response data to writeApiResponse
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeApiResponse);
+    // use the response
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    // set timeout
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+    // don't let signal interrupt other threads
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    curlResult = curl_easy_perform(curl);
+
+    if (curlResult != CURLE_OK || response.data == NULL) {
+
+        fprintf(stderr, "Pangram submission failed: %s\n", curl_easy_strerror(curlResult));
+
+        free(response.data);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        json_object_put(requestJson);
+
+        return -1;
+    }
+
+    // parse Pangram's response.
+    // https://github.com/json-c/json-c/blob/master/tests/test1.c
+    responseJson = json_tokener_parse(response.data);
+
+    if (responseJson == NULL || !json_object_object_get_ex(responseJson, "task_id", &taskIdJson)) {
+
+        fprintf(stderr, "Pangram did not return a task ID\n");
+
+        json_object_put(responseJson);
+        free(response.data);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        json_object_put(requestJson);
+
+        return -1;
+    }
+
+    // copy the task ID into the buffer
+    strncpy(taskId, json_object_get_string(taskIdJson), sizeof(taskId) - 1);
+
+    taskId[sizeof(taskId) - 1] = '\0';
+
+    json_object_put(responseJson);
+    responseJson = NULL;
+
+    free(response.data);
+    response.data = NULL;
+    response.size = 0;
+
+    // poll until it works or times out
+    for (int attempt = 0; attempt < 10; attempt++) {
+        // get https://text.external-api.pangram.com/task/<taskId>
+        snprintf(taskUrl, sizeof(taskUrl), "https://text.external-api.pangram.com/task/%s", taskId);
+
+        // change the CURL handle from POST to GET
+        curl_easy_setopt( curl, CURLOPT_URL, taskUrl);
+
+        curl_easy_setopt( curl, CURLOPT_POST, 0L);
+
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+
+        // reset the response buffer
+        free(response.data);
+        response.data = NULL;
+        response.size = 0;
+
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeApiResponse);
+
+        curl_easy_setopt( curl, CURLOPT_WRITEDATA, &response);
+
+        // Send the polling request.
+        curlResult = curl_easy_perform(curl);
+
+        if (curlResult != CURLE_OK || response.data == NULL) {
+            break;
+        }
+
+        // Parse the response
+        responseJson = json_tokener_parse(response.data);
+
+        if (responseJson == NULL || !json_object_object_get_ex(responseJson, "stage", &stageJson)) {
+
+            json_object_put(responseJson);
+            break;
+        }
+
+        const char *stage = json_object_get_string(stageJson);
+
+        if (strcmp(stage, "STAGE_SUCCESS") == 0 && json_object_object_get_ex(responseJson, "headline", &headlineJson)) {
+
+            strncpy(result, json_object_get_string(headlineJson), resultSize - 1);
+
+            result[resultSize - 1] = '\0';
+
+            json_object_put(responseJson);
+            free(response.data);
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            json_object_put(requestJson);
+
+            return 0;
+        }
+
+        if (strcmp(stage, "STAGE_FAILED") == 0) {
+            fprintf(stderr, "Pangram failed\n");
+
+            json_object_put(responseJson);
+            break;
+        }
+
+        json_object_put(responseJson);
+        responseJson = NULL;
+
+        free(response.data);
+        response.data = NULL;
+        response.size = 0;
+
+        sleep(1);
+    }
+
+    // clean resources
+    free(response.data);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    json_object_put(requestJson);
+
+    return -1;
+}
 
 /**
  * Processes one HTTP request and sends the appropriate response.
@@ -959,7 +1225,7 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
     */
 
    if (path[0] != '/' || snprintf(fullPath, sizeof(fullPath),
-   "%s%s", webroot, path) >= sizeof(fullPath)) {
+   "%s%s", webroot, path) >= (int)sizeof(fullPath)) {
        buildResponse(fd, 404, 0, "text/plain", connection);
        return;
     }
@@ -1292,6 +1558,11 @@ static int makeListener(void)
 
 int main(int argc, char **argv)
 {
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
+        fprintf(stderr, "Could not initialize libcurl\n");
+        return EXIT_FAILURE;
+    }
+
     // Get the mode from the command-line argument
     const char *mode = argc > 1 ? argv[1] :
             "persistent";
@@ -1352,7 +1623,7 @@ int main(int argc, char **argv)
             free(args);
         }
     }
-
+    curl_global_cleanup();
     close(listener);
     return EXIT_FAILURE;
 }
