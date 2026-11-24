@@ -840,12 +840,6 @@ static int scanTraffic(const char *clientIP, const char *path, size_t *rapidCoun
         return 2;
     }
 
-    // If content scan path, check if content is ai generated.
-    if (strcmp(method, "POST") == 0) {
-
-    }
-
-    
     return 0; //allowed!
 }
 
@@ -860,7 +854,7 @@ static char* verdictReason(int verdict) {
         case 0: return "none";
         case 1: return "Blacklisted address";
         case 2: return "Suspicious activity";
-        case 3: return "AG-Generated content";
+        case 3: return "AI-Generated content";
         default: return "Server error";
     }
 }
@@ -1304,11 +1298,13 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
         return;
     }
 
+    /*
     //Traffic validated, make forwarded request and buffer back
     //Browser just requests this repeatedly, best not to log
     if (!newViolation && verdict == 0 && strcmp(path, "/favicon.ico") != 0) {
         logEvent(clientIP, method, path, 0, "none");
     }
+    */
 
     // these request types almost always have a body(delete only sometimes)
     if ((strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 || strcmp(method, "PATCH") == 0 || strcmp(method, "DELETE") == 0) && isText(request)) {
