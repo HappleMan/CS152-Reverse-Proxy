@@ -1175,7 +1175,6 @@ static int checkTextWithPangram(const char *text, size_t textLength, char *resul
     return -1;
 }
 
-
 /**
  * Processes one HTTP request and sends the appropriate response.
  *
@@ -1318,8 +1317,12 @@ static void serveRequest(int fd, const char *request, size_t requestLength, cons
 
             // checkTextWithPangram returns 0 if nothing went wrong
             if (pangramStatus == 0) {
+                int flag = 0;
+                if (strcmp(pangramResult, "AI-Generated") == 0 || strcmp(pangramResult, "AI Generated") == 0 || strcmp(pangramResult, "AI Assisted") == 0 || strcmp(pangramResult, "AI-Assisted") == 0) {
+                    flag = 3; // AI gen
+                }
                 // put the result of the AI check. flag the AI content but don't ban, leave that to the admin
-                logEvent(clientIP, method, path,2, pangramResult);
+                logEvent(clientIP, method, path,flag, pangramResult);
             } else {
                 logEvent(clientIP, method, path,0, "Pangram error");
             }

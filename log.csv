@@ -448,3 +448,9 @@ timestamp,date,ip,method,path,flagged,reason
 1795395471,2026-11-22 16:57:51,127.0.0.1,POST,/test,1,Blacklisted address
 1795481690,2026-11-23 16:54:50,127.0.0.1,GET,/robots.txt,1,Blacklisted address
 1795482174,2026-11-23 17:02:54,127.0.0.1,GET,/robots.txt,0,none
+1795550961,2026-11-24 12:09:21,127.0.0.1,POST,/test,0,Pangram error
+1795550985,2026-11-24 12:09:45,127.0.0.1,POST,/test,0,Pangram error
+1795551289,2026-11-24 12:14:49,127.0.0.1,POST,/test,0,Pangram error
+1795551322,2026-11-24 12:15:22,127.0.0.1,POST,/test,2,AI Generated
+1795551443,2026-11-24 12:17:23,127.0.0.1,POST,/test,2,AI Generated
+1795552394,2026-11-24 12:33:14,127.0.0.1,POST,/test,3,AI Generated
